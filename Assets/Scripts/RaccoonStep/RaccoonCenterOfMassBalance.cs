@@ -23,23 +23,32 @@ namespace RaccoonStep
         public float BalanceGain = 1.6f;
         public float MaxCorrectionSpeed = 0.45f;
         public float MaxCorrectionPerFixedStep = 0.025f;
+        [Tooltip("Short transition window used to move the COM over the newly planted support foot before judging a fall.")]
+        public float SingleSupportBalanceSettlingTime = 0.22f;
 
         [Header("Fall response")]
         public bool EnableFallResponse = true;
-        [Tooltip("When false, the initial support-foot COM test will not trigger an automatic fall.")]
-        public bool EnableAutomaticBalanceFall = false;
+        [Tooltip("Use the measured proxy-body COM against the current foot support region as the fall trigger.")]
+        public bool EnableAutomaticBalanceFall = true;
         [Tooltip("Release the proxy rigidbodies and let Unity simulate the actual fall.")]
         public bool UseDynamicPhysicsForFall = false;
 
         public float FallBalanceDistance = 0.24f;
         [Tooltip("Maximum horizontal support radius while one foot is planted.")]
-        public float SingleFootSupportRadius = 0.28f;
+        public float SingleFootSupportRadius = 0.20f;
         [Tooltip("Maximum horizontal support radius while both feet are planted.")]
-        public float DoubleFootSupportRadius = 0.38f;
+        public float DoubleFootSupportRadius = 0.14f;
         [Tooltip("When the two feet are closer than this distance, stability decreases.")]
         public float CloseFeetDistance = 0.18f;
         [Tooltip("Smallest support radius when both feet are almost together.")]
-        public float CloseFeetSupportRadius = 0.10f;
+        public float CloseFeetSupportRadius = 0.08f;
+        [Header("Foot placement validity")]
+        [Tooltip("Reject a planted stance when the two foot proxy colliders overlap.")]
+        public bool EnableInvalidFootPlacementFall = true;
+        [Tooltip("Horizontal tolerance before left/right foot ordering is considered crossed.")]
+        public float FootCrossTolerance = 0.015f;
+        [Tooltip("Deterministic horizontal separation threshold for two planted feet.")]
+        public float FootMinimumSeparation = 0.13f;
 
         [Tooltip("Body tilt angle that immediately starts the fall timer.")]
         public float FallingTiltAngle = 42f;
@@ -111,14 +120,19 @@ namespace RaccoonStep
         Vector3 _mouseComTargetLocal;
         Vector3 _mouseComCurrentLocal;
         bool _middleDragActive;
-        [Header("Static COM fall")]
-        public bool EnableManualCenterOfMassFall = true;
+        [Header("Legacy manual COM fall")]
+        [Tooltip("Legacy input-only fall trigger. Keep disabled when using real foot-placement feedback.")]
+        public bool EnableManualCenterOfMassFall = false;
         [Tooltip("Horizontal manual COM offset required before the fall timer starts.")]
         public float ManualCenterOfMassFallThreshold = 0.12f;
         [Tooltip("How long the manual COM offset must remain beyond the threshold.")]
         public float ManualCenterOfMassFallDelay = 0.65f;
         float _manualComExceededTime;
         Vector3 _manualFallDirectionWorld;
+        float _singleSupportTime;
+        bool _wasSingleSupport;
+        float _invalidFootPlacementTime;
+        Vector3 _invalidFootFallDirectionWorld;
 
 
         void Awake()
@@ -247,10 +261,63 @@ void FixedUpdate()
                 Mathf.Max(0f, MouseCenterOfMassSmoothing) * Time.fixedDeltaTime);
 ApplyUpperBodyFeedback();
 
-            if (UpdateManualCenterOfMassFall())
+            bool singleSupport = StepController.IsSingleSupport;
+            if (singleSupport)
+            {
+                _singleSupportTime = _wasSingleSupport
+                    ? _singleSupportTime + Time.fixedDeltaTime
+                    : 0f;
+                StepController.MaintainSupportFoot();
+            }
+            else
+            {
+                _singleSupportTime = 0f;
+            }
+            _wasSingleSupport = singleSupport;
+
+            bool invalidFootPlacement = !singleSupport && HasInvalidPlantedFootPlacement();
+            if (invalidFootPlacement)
+            {
+                _invalidFootPlacementTime += Time.fixedDeltaTime;
+                if (_invalidFootPlacementTime >= Mathf.Max(0.01f, FallGraceTime))
+                {
+                    _manualFallDirectionWorld = _invalidFootFallDirectionWorld;
+                    BeginFall();
+                    return;
+                }
+            }
+            else
+            {
+                _invalidFootPlacementTime = 0f;
+                _invalidFootFallDirectionWorld = Vector3.zero;
+            }
+
+            // Correct the body before evaluating the fall condition. The old
+            // order judged the stale pre-lift COM first, so raising one foot
+            // could trigger a fall before the body had any chance to shift
+            // over the planted foot.
+            Vector3 correction = Vector3.zero;
+            if (ApplyBalanceCorrection && singleSupport)
+            {
+                correction = BalanceError * BalanceGain * Time.fixedDeltaTime;
+                correction = Vector3.ClampMagnitude(
+                    correction, MaxCorrectionSpeed * Time.fixedDeltaTime);
+                correction = Vector3.ClampMagnitude(correction, MaxCorrectionPerFixedStep);
+                StepController.ApplyBalanceCorrection(correction);
+            }
+
+            // The measured COM/support test is the primary fall path. The
+            // old WASD-duration trigger is optional and deliberately runs
+            // only as a legacy override, so keyboard input cannot masquerade
+            // as a physical loss of support.
+            if (EnableManualCenterOfMassFall && UpdateManualCenterOfMassFall())
                 return;
 
             float balanceDistance = new Vector2(BalanceError.x, BalanceError.z).magnitude;
+            // The correction above moves the COM toward the support point in
+            // this same fixed step. Use the remaining estimated error for the
+            // decision rather than waiting one frame for the next measurement.
+            balanceDistance = Mathf.Max(0f, balanceDistance - new Vector2(correction.x, correction.z).magnitude);
             bool precisePlacement = IsPrecisePlacementMode();
             float configuredLimit = precisePlacement
                 ? FallBalanceDistance
@@ -261,9 +328,15 @@ ApplyUpperBodyFeedback();
             EffectiveSupportRadius = supportRadius;
             float allowedDistance = Mathf.Min(configuredLimit, supportRadius);
 
+            // This is the actual foot-placement feedback signal: once the
+            // projected, mass-weighted COM leaves the support capsule formed
+            // by the planted foot(s), the character is physically unstable.
             bool balanceExceeded = balanceDistance > allowedDistance;
             bool tiltExceeded = BodyTiltAngle >= FallingTiltAngle;
-            if (EnableFallResponse && (tiltExceeded || (EnableAutomaticBalanceFall && balanceExceeded)))
+            bool supportTransitioning = singleSupport
+                && _singleSupportTime < Mathf.Max(0f, SingleSupportBalanceSettlingTime);
+            bool supportLost = EnableAutomaticBalanceFall && balanceExceeded && !supportTransitioning;
+            if (EnableFallResponse && (tiltExceeded || supportLost))
             {
                 _unbalancedTime += Time.fixedDeltaTime;
                 if (_unbalancedTime >= FallGraceTime)
@@ -277,16 +350,8 @@ ApplyUpperBodyFeedback();
                 _unbalancedTime = 0f;
             }
 
-            StepController.MaintainSupportFoot();
-
-            if (!ApplyBalanceCorrection || !StepController.IsSingleSupport)
-                return;
-
-            Vector3 correction = BalanceError * BalanceGain * Time.fixedDeltaTime;
-            correction = Vector3.ClampMagnitude(
-                correction, MaxCorrectionSpeed * Time.fixedDeltaTime);
-            correction = Vector3.ClampMagnitude(correction, MaxCorrectionPerFixedStep);
-            StepController.ApplyBalanceCorrection(correction);
+            // Correction is intentionally applied before the fall test above.
+            // Nothing else is needed here for this fixed step.
         }
 
 
@@ -325,6 +390,51 @@ ApplyUpperBodyFeedback();
                 (closeDistance - FeetDistance) / closeDistance);
             return Mathf.Lerp(DoubleFootSupportRadius,
                 CloseFeetSupportRadius, closeFactor);
+        }
+
+        bool HasInvalidPlantedFootPlacement()
+        {
+            if (!EnableInvalidFootPlacementFall
+                || _leftFootProxy == null || _rightFootProxy == null)
+                return false;
+
+            Vector3 leftLocal = transform.InverseTransformPoint(_leftFootProxy.position);
+            Vector3 rightLocal = transform.InverseTransformPoint(_rightFootProxy.position);
+            bool crossed = leftLocal.x > rightLocal.x - Mathf.Max(0f, FootCrossTolerance);
+
+            Collider leftCollider = _leftFootProxy.GetComponent<Collider>();
+            Collider rightCollider = _rightFootProxy.GetComponent<Collider>();
+            bool overlapping = false;
+            Vector3 penetrationDirection = Vector3.zero;
+            float penetrationDistance = 0f;
+            if (leftCollider != null && rightCollider != null)
+            {
+                overlapping = Physics.ComputePenetration(
+                    leftCollider, leftCollider.transform.position, leftCollider.transform.rotation,
+                    rightCollider, rightCollider.transform.position, rightCollider.transform.rotation,
+                    out penetrationDirection, out penetrationDistance);
+            }
+
+            Vector3 horizontalSeparation = _leftFootProxy.position - _rightFootProxy.position;
+            horizontalSeparation.y = 0f;
+            bool tooClose = horizontalSeparation.magnitude
+                < Mathf.Max(0.01f, FootMinimumSeparation);
+
+            if (!crossed && !overlapping && !tooClose)
+                return false;
+
+            Vector3 left = _leftFootProxy.position;
+            Vector3 right = _rightFootProxy.position;
+            Vector3 separation = left - right;
+            separation.y = 0f;
+            if (separation.sqrMagnitude > 0.0001f)
+                _invalidFootFallDirectionWorld = separation.normalized;
+            else if (penetrationDirection.sqrMagnitude > 0.0001f)
+                _invalidFootFallDirectionWorld = penetrationDirection.normalized;
+            else
+                _invalidFootFallDirectionWorld = transform.forward;
+
+            return true;
         }
 
 void BeginFall()

@@ -4939,14 +4939,18 @@ MonoBehaviour:
   BalanceGain: 1.6
   MaxCorrectionSpeed: 0.45
   MaxCorrectionPerFixedStep: 0.025
+  SingleSupportBalanceSettlingTime: 0.22
   EnableFallResponse: 1
-  EnableAutomaticBalanceFall: 0
+  EnableAutomaticBalanceFall: 1
   UseDynamicPhysicsForFall: 0
   FallBalanceDistance: 0.24
-  SingleFootSupportRadius: 0.28
-  DoubleFootSupportRadius: 0.38
+  SingleFootSupportRadius: 0.2
+  DoubleFootSupportRadius: 0.14
   CloseFeetDistance: 0.18
-  CloseFeetSupportRadius: 0.1
+  CloseFeetSupportRadius: 0.08
+  EnableInvalidFootPlacementFall: 1
+  FootCrossTolerance: 0.015
+  FootMinimumSeparation: 0.13
   FallingTiltAngle: 42
   NormalFallBalanceDistance: 0.55
   FallGraceTime: 0.18
@@ -4965,7 +4969,7 @@ MonoBehaviour:
   MouseCenterOfMassRange: 0.18
   MouseCenterOfMassGain: 1
   MouseCenterOfMassSmoothing: 8
-  EnableManualCenterOfMassFall: 1
+  EnableManualCenterOfMassFall: 0
   ManualCenterOfMassFallThreshold: 0.12
   ManualCenterOfMassFallDelay: 0.65
 --- !u!1 &903102973

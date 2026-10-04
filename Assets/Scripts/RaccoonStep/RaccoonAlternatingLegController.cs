@@ -102,8 +102,8 @@ namespace RaccoonStep
             public float LowerLength;
             public float FootLength;
             public Vector3 FootAxis;
-            public Quaternion UpperTwist;
-            public Quaternion LowerTwist;
+            public Vector3 UpperReferenceForwardLocal;
+            public Vector3 LowerReferenceForwardLocal;
             public Quaternion FootVisualRotation;
             public Quaternion FootVisualToProxyRotation;
         }
@@ -244,10 +244,12 @@ namespace RaccoonStep
             };
             if (leg.FootAxis.sqrMagnitude < 0.001f)
                 leg.FootAxis = transform.forward;
-            leg.UpperTwist = Quaternion.Inverse(Quaternion.FromToRotation(Vector3.up,
-                (lower.position - upper.position).normalized)) * upperProxy.rotation;
-            leg.LowerTwist = Quaternion.Inverse(Quaternion.FromToRotation(Vector3.up,
-                (foot.position - lower.position).normalized)) * lowerProxy.rotation;
+            // Keep a stable roll reference for each leg segment. Rebuilding
+            // a segment from FromToRotation(up, axis) alone is ambiguous when
+            // the axis is near vertical or reverses direction, which causes
+            // visible lower-leg axial flips.
+            leg.UpperReferenceForwardLocal = transform.InverseTransformDirection(upperProxy.forward);
+            leg.LowerReferenceForwardLocal = transform.InverseTransformDirection(lowerProxy.forward);
             return leg;
         }
 
@@ -438,7 +440,12 @@ void BeginLanding()
             Vector3 calibratedTarget = desiredHip
                 - transform.TransformVector(_active.HipLocal);
             calibratedTarget.y = _rootStart.y;
-            _rootTarget = calibratedTarget;
+            // The body must not teleport all the way to the newly planted
+            // foot. Keep only a fraction of that displacement so the actual
+            // COM/support relationship can reveal an overly long or badly
+            // placed step and feed back into the balance solver.
+            float advance = Mathf.Clamp01(BodyAdvanceFactor);
+            _rootTarget = Vector3.Lerp(_rootStart, calibratedTarget, advance);
             _progress = 0f;
             _state = StepState.Landing;
         }
@@ -523,8 +530,10 @@ bool TryGetGroundTarget(out Vector3 target)
             float sinKnee = Mathf.Sqrt(Mathf.Max(0f, 1f - cosKnee * cosKnee));
             Vector3 knee = hip + direction * (cosKnee * leg.UpperLength) + bend * (sinKnee * leg.UpperLength);
 
-            SetSegment(leg.UpperProxy, hip, knee, leg.UpperTwist);
-            SetSegment(leg.LowerProxy, knee, ankle, leg.LowerTwist);
+            SetSegment(leg.UpperProxy, hip, knee,
+                transform.TransformDirection(leg.UpperReferenceForwardLocal));
+            SetSegment(leg.LowerProxy, knee, ankle,
+                transform.TransformDirection(leg.LowerReferenceForwardLocal));
             Vector3 footAxis = Vector3.ProjectOnPlane(leg.FootAxis, Vector3.up).normalized;
             if (footAxis.sqrMagnitude < 0.0001f)
                 footAxis = transform.forward;
@@ -533,13 +542,20 @@ bool TryGetGroundTarget(out Vector3 target)
             leg.FootProxy.rotation = leg.FootVisualRotation * Quaternion.Inverse(leg.FootVisualToProxyRotation);
         }
 
-        void SetSegment(Transform proxy, Vector3 start, Vector3 end, Quaternion twist)
+        void SetSegment(Transform proxy, Vector3 start, Vector3 end, Vector3 referenceForward)
         {
             Vector3 axis = end - start;
             if (axis.sqrMagnitude < 0.000001f)
                 axis = Vector3.up * 0.01f;
+            axis.Normalize();
             proxy.position = Vector3.Lerp(start, end, 0.5f);
-            proxy.rotation = Quaternion.FromToRotation(Vector3.up, axis.normalized) * twist;
+
+            Vector3 forward = Vector3.ProjectOnPlane(referenceForward, axis);
+            if (forward.sqrMagnitude < 0.000001f)
+                forward = Vector3.ProjectOnPlane(transform.forward, axis);
+            if (forward.sqrMagnitude < 0.000001f)
+                forward = Vector3.Cross(axis, transform.right);
+            proxy.rotation = Quaternion.LookRotation(forward.normalized, axis);
         }
     }
 }
