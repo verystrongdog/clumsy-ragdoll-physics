@@ -60,7 +60,7 @@ namespace RaccoonStep
             RaccoonFootController footController = GetComponent<RaccoonFootController>();
             if (footController != null) footController.enabled = false;
             RaccoonBalance balance = GetComponent<RaccoonBalance>();
-            if (balance != null) balance.enabled = false;
+            if (balance != null) balance.enabled = true;
             RaccoonMouseInput mouseInput = GetComponent<RaccoonMouseInput>();
             if (mouseInput != null) mouseInput.enabled = false;
         }

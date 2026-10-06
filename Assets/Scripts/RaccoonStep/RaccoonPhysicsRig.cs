@@ -40,6 +40,21 @@ namespace RaccoonStep
         [Tooltip("Number of fixed steps used to hand proxy bodies to dynamic physics during a fall.")]
         public int HybridReleaseFixedSteps = 3;
 
+        [Header("Fall collision envelope")]
+        [Tooltip("Temporary multiplier for proxy collider radii during a fall. The imported visual mesh is much wider than the walking proxy, so this must be substantially larger than 1.")]
+        public float FallColliderScale = 3.5f;
+        [Tooltip("Maximum depenetration speed used only while the fall envelope is active.")]
+        public float FallMaxDepenetrationVelocity = 4f;
+        [Tooltip("Extra clearance kept between non-tail visible geometry and the ground during the controlled fall.")]
+        public float FallVisualGroundMargin = 0.003f;
+        [Tooltip("Ground height used by the visible-mesh fall clearance pass.")]
+        public float FallGroundHeight = 0f;
+        [Tooltip("Ignore tail materials when calculating visible-mesh ground clearance.")]
+        public bool ExcludeTailMaterialFromFallClearance = true;
+        [Tooltip("Enable the baked visible-mesh clearance pass. Disabled by default because baking a large skinned mesh during physics can stall the editor.")]
+        public bool EnableFallVisualGroundClearance = false;
+        public string TailMaterialKeyword = "尾巴";
+
         public int BodyCount { get; private set; }
         public int JointCount { get; private set; }
         public Transform PhysicsRoot { get; private set; }
@@ -47,7 +62,13 @@ namespace RaccoonStep
         readonly Dictionary<Transform, ProxyBinding> _visualToProxy = new Dictionary<Transform, ProxyBinding>();
         readonly List<Rigidbody> _bodies = new List<Rigidbody>();
         readonly List<Collider> _colliders = new List<Collider>();
+        readonly List<float> _baseColliderRadii = new List<float>();
+        readonly List<float> _baseColliderHeights = new List<float>();
+        readonly List<float> _baseMaxDepenetrationVelocities = new List<float>();
         readonly List<ConfigurableJoint> _joints = new List<ConfigurableJoint>();
+        SkinnedMeshRenderer[] _visualRenderers;
+        Mesh _fallBakedMesh;
+        bool _fallColliderMode;
         bool _built;
 
         readonly List<Vector3> _initialBodyLocalPositions = new List<Vector3>();
@@ -116,6 +137,9 @@ namespace RaccoonStep
             PhysicsRoot.localPosition = Vector3.zero;
             PhysicsRoot.localRotation = Quaternion.identity;
             PhysicsRoot.localScale = Vector3.one;
+
+            _visualRenderers = GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            _fallBakedMesh = new Mesh { name = "RaccoonFallGroundProbe" };
 
             ProxyPart hips = CreatePart("HipsBody", BoneMap.hips, BoneMap.spine, 5.0f, ColliderRadius * 1.8f);
             ProxyPart spine = CreatePart("SpineBody", BoneMap.spine, BoneMap.neck != null ? BoneMap.neck : BoneMap.head, 2.5f, ColliderRadius * 1.45f);
@@ -190,14 +214,17 @@ namespace RaccoonStep
             if (body == null || !body.isKinematic)
                 return;
 
-            body.linearVelocity = Vector3.zero;
-            body.angularVelocity = Vector3.zero;
+            // A kinematic Rigidbody rejects velocity assignments. Switch it
+            // to dynamic first, then clear the velocities before simulation.
             body.isKinematic = false;
             body.useGravity = true;
+            body.linearVelocity = Vector3.zero;
+            body.angularVelocity = Vector3.zero;
         }
 
         public void BeginKinematicFallPose()
         {
+            SetFallColliderMode(true);
             _fallStartWorldPositions.Clear();
             _fallStartWorldRotations.Clear();
             for (int i = 0; i < _bodies.Count; i++)
@@ -233,6 +260,13 @@ namespace RaccoonStep
             // the rig is released to dynamic physics. Resolve that overlap
             // immediately so the later handoff never starts from penetration.
             ResolveKinematicGroundPenetration();
+
+            // The proxy capsules approximate the skeleton and can be smaller
+            // than the rendered body. Keep the visible non-tail geometry above
+            // the ground before the dynamic handoff.
+            SyncVisualBonesToProxy();
+            if (EnableFallVisualGroundClearance)
+                ResolveVisibleGroundPenetration();
         }
 
         void ResolveKinematicGroundPenetration()
@@ -293,6 +327,97 @@ namespace RaccoonStep
             }
         }
 
+        void SetFallColliderMode(bool active)
+        {
+            if (!_built && _colliders.Count == 0)
+                return;
+
+            _fallColliderMode = active;
+            float scale = Mathf.Max(1f, FallColliderScale);
+            for (int i = 0; i < _colliders.Count; i++)
+            {
+                CapsuleCollider capsule = _colliders[i] as CapsuleCollider;
+                if (capsule == null)
+                    continue;
+
+                float baseRadius = i < _baseColliderRadii.Count
+                    ? _baseColliderRadii[i] : capsule.radius;
+                float baseHeight = i < _baseColliderHeights.Count
+                    ? _baseColliderHeights[i] : capsule.height;
+                float radius = active ? baseRadius * scale : baseRadius;
+                capsule.radius = radius;
+                capsule.height = baseHeight + 2f * (radius - baseRadius);
+
+                if (i < _bodies.Count && _bodies[i] != null)
+                {
+                    _bodies[i].maxDepenetrationVelocity = active
+                        ? Mathf.Max(0.01f, FallMaxDepenetrationVelocity)
+                        : (i < _baseMaxDepenetrationVelocities.Count
+                            ? _baseMaxDepenetrationVelocities[i]
+                            : Mathf.Max(0.01f, ProxyMaxDepenetrationVelocity));
+                }
+            }
+        }
+
+        void ResolveVisibleGroundPenetration()
+        {
+            if (!_fallColliderMode || _visualRenderers == null || _fallBakedMesh == null)
+                return;
+
+            float minimumY = float.PositiveInfinity;
+            for (int r = 0; r < _visualRenderers.Length; r++)
+            {
+                SkinnedMeshRenderer renderer = _visualRenderers[r];
+                if (renderer == null || renderer.sharedMesh == null)
+                    continue;
+
+                renderer.BakeMesh(_fallBakedMesh, true);
+                Material[] materials = renderer.sharedMaterials;
+                int subMeshCount = Mathf.Min(_fallBakedMesh.subMeshCount, materials.Length);
+                for (int sub = 0; sub < subMeshCount; sub++)
+                {
+                    Material material = materials[sub];
+                    if (ExcludeTailMaterialFromFallClearance && IsTailMaterial(material))
+                        continue;
+
+                    int[] triangles = _fallBakedMesh.GetTriangles(sub);
+                    for (int i = 0; i < triangles.Length; i++)
+                    {
+                        Vector3 world = renderer.transform.TransformPoint(
+                            _fallBakedMesh.vertices[triangles[i]]);
+                        minimumY = Mathf.Min(minimumY, world.y);
+                    }
+                }
+            }
+
+            if (float.IsPositiveInfinity(minimumY))
+                return;
+
+            float requiredY = FallGroundHeight + Mathf.Max(0f, FallVisualGroundMargin);
+            float lift = requiredY - minimumY;
+            if (lift <= 0f)
+                return;
+
+            for (int i = 0; i < _bodies.Count; i++)
+            {
+                Rigidbody body = _bodies[i];
+                if (body != null && body.isKinematic)
+                    body.MovePosition(body.position + Vector3.up * lift);
+            }
+            Physics.SyncTransforms();
+        }
+
+        bool IsTailMaterial(Material material)
+        {
+            if (material == null)
+                return false;
+
+            string name = material.name ?? string.Empty;
+            return name.IndexOf("tail", System.StringComparison.OrdinalIgnoreCase) >= 0
+                || (!string.IsNullOrEmpty(TailMaterialKeyword)
+                    && name.IndexOf(TailMaterialKeyword, System.StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
         public Transform GetProxyFor(Transform visualBone)
         {
             if (visualBone == null)
@@ -302,6 +427,163 @@ namespace RaccoonStep
             return _visualToProxy.TryGetValue(visualBone, out binding) && binding != null
                 ? binding.Proxy
                 : null;
+        }
+
+        /// <summary>
+        /// Physics-driven recovery target. The recovery controller supplies a
+        /// desired segment pose; this method applies bounded PD force/torque
+        /// instead of teleporting the proxy transform.
+        /// </summary>
+        public void DriveRecoverySegment(Transform proxy, Vector3 start, Vector3 end, Quaternion twist)
+        {
+            if (proxy == null)
+                return;
+            Rigidbody body = proxy.GetComponent<Rigidbody>();
+            if (body == null || body.isKinematic)
+                return;
+
+            Vector3 axis = end - start;
+            if (axis.sqrMagnitude < 0.000001f)
+                axis = Vector3.up * 0.01f;
+            Vector3 targetPosition = (start + end) * 0.5f;
+            Quaternion targetRotation = (Quaternion.FromToRotation(Vector3.up, axis.normalized) * twist).normalized;
+            DriveRecoveryBody(body, targetPosition, targetRotation);
+        }
+
+        public void DriveRecoveryPoint(Transform proxy, Vector3 targetPosition, Quaternion targetRotation)
+        {
+            if (proxy == null)
+                return;
+            Rigidbody body = proxy.GetComponent<Rigidbody>();
+            if (body == null)
+                return;
+            if (body.isKinematic)
+            {
+                // The recovery pelvis is the single controlled root. Move it
+                // kinematically so the articulated dynamic children follow
+                // through their ConfigurableJoints without launching the rig.
+                body.MovePosition(targetPosition);
+                body.MoveRotation(targetRotation);
+                return;
+            }
+            DriveRecoveryBody(body, targetPosition, targetRotation);
+        }
+
+        void DriveRecoveryBody(Rigidbody body, Vector3 targetPosition, Quaternion targetRotation)
+        {
+            const float positionSpring = 70f;
+            const float positionDamper = 18f;
+            const float rotationSpring = 55f;
+            const float rotationDamper = 14f;
+            Vector3 force = (targetPosition - body.position) * positionSpring
+                - body.linearVelocity * positionDamper;
+            if (force.sqrMagnitude > 36f)
+                force = force.normalized * 6f;
+            body.AddForce(force, ForceMode.Acceleration);
+
+            Quaternion delta = targetRotation * Quaternion.Inverse(body.rotation);
+            delta.ToAngleAxis(out float angle, out Vector3 axis);
+            if (angle > 180f) angle -= 360f;
+            if (axis.sqrMagnitude > 0.000001f)
+            {
+                Vector3 torque = axis.normalized * (angle * Mathf.Deg2Rad * rotationSpring)
+                    - body.angularVelocity * rotationDamper;
+                if (torque.sqrMagnitude > 36f)
+                    torque = torque.normalized * 6f;
+                body.AddTorque(torque, ForceMode.Acceleration);
+            }
+        }
+
+        /// <summary>
+        /// Walking deliberately ignores proxy-vs-proxy contacts. Recovery can
+        /// opt a single leg back into contact with the locked pelvis and torso
+        /// while it is being folded, so the leg cannot freely pass through the
+        /// body envelope.
+        /// </summary>
+        public void SetRecoveryLegBodyCollision(Transform upperLeg, Transform lowerLeg, Transform foot, bool enabled)
+        {
+            if (!_built || PhysicsRoot == null)
+                return;
+
+            Collider[] leg =
+            {
+                GetProxyCollider(upperLeg),
+                GetProxyCollider(lowerLeg),
+                GetProxyCollider(foot)
+            };
+            Collider[] body =
+            {
+                GetProxyCollider(BoneMap != null ? BoneMap.hips : null),
+                GetProxyCollider(BoneMap != null ? BoneMap.spine : null),
+                GetProxyCollider(BoneMap != null ? BoneMap.head : null)
+            };
+
+            for (int i = 0; i < leg.Length; i++)
+            {
+                if (leg[i] == null) continue;
+                for (int j = 0; j < body.Length; j++)
+                {
+                    if (body[j] == null || body[j] == leg[i]) continue;
+                    Physics.IgnoreCollision(leg[i], body[j], !enabled);
+                }
+            }
+        }
+
+        Collider GetProxyCollider(Transform visualBone)
+        {
+            Transform proxy = GetProxyFor(visualBone);
+            return proxy != null ? proxy.GetComponent<Collider>() : null;
+        }
+
+        public void ResolveRecoveryLegBodyPenetration(Transform upper, Transform lower, Transform foot)
+        {
+            if (!_built || BoneMap == null)
+                return;
+
+            Collider[] leg =
+            {
+                upper != null ? upper.GetComponent<Collider>() : null,
+                lower != null ? lower.GetComponent<Collider>() : null,
+                foot != null ? foot.GetComponent<Collider>() : null
+            };
+            Collider[] body =
+            {
+                GetProxyCollider(BoneMap.hips),
+                GetProxyCollider(BoneMap.spine),
+                GetProxyCollider(BoneMap.head)
+            };
+
+            for (int i = 0; i < leg.Length; i++)
+            {
+                Collider legCollider = leg[i];
+                if (legCollider == null) continue;
+                Vector3 correction = Vector3.zero;
+                for (int j = 0; j < body.Length; j++)
+                {
+                    Collider bodyCollider = body[j];
+                    if (bodyCollider == null || bodyCollider == legCollider) continue;
+                    Vector3 direction;
+                    float distance;
+                    if (Physics.ComputePenetration(
+                        legCollider, legCollider.transform.position, legCollider.transform.rotation,
+                        bodyCollider, bodyCollider.transform.position, bodyCollider.transform.rotation,
+                        out direction, out distance))
+                    {
+                        correction += direction * (distance + 0.001f);
+                    }
+                }
+
+                if (correction.sqrMagnitude > 0.0000001f)
+                {
+                    Vector3 delta = correction / Mathf.Max(1, leg.Length);
+                    for (int k = 0; k < leg.Length; k++)
+                    {
+                        if (leg[k] != null)
+                            leg[k].transform.position += delta;
+                    }
+                }
+            }
+            Physics.SyncTransforms();
         }
 
         void LateUpdate()
@@ -320,8 +602,20 @@ namespace RaccoonStep
                 // directly onto the visual skeleton.
                 binding.Visual.SetPositionAndRotation(
                     binding.Proxy.TransformPoint(binding.PositionOffsetLocal),
-                    binding.Proxy.rotation * binding.RotationOffsetLocal);
+                    NormalizeRotation(binding.Proxy.rotation * binding.RotationOffsetLocal));
             }
+        }
+
+        static Quaternion NormalizeRotation(Quaternion rotation)
+        {
+            float magnitude = Mathf.Sqrt(rotation.x * rotation.x
+                + rotation.y * rotation.y
+                + rotation.z * rotation.z
+                + rotation.w * rotation.w);
+            return magnitude > 0.000001f && !float.IsNaN(magnitude)
+                ? new Quaternion(rotation.x / magnitude, rotation.y / magnitude,
+                    rotation.z / magnitude, rotation.w / magnitude)
+                : Quaternion.identity;
         }
 
 ProxyPart CreatePart(string name, Transform visualBone, Transform visualChild, float mass, float radius)
@@ -375,6 +669,9 @@ ProxyPart CreatePart(string name, Transform visualBone, Transform visualChild, f
 
             _bodies.Add(body);
             _colliders.Add(capsule);
+            _baseColliderRadii.Add(capsule.radius);
+            _baseColliderHeights.Add(capsule.height);
+            _baseMaxDepenetrationVelocities.Add(body.maxDepenetrationVelocity);
             _visualToProxy[visualBone] = new ProxyBinding(visualBone, proxy);
             return new ProxyPart(proxy, body, start, end);
         }
@@ -472,6 +769,7 @@ public void BeginHybridFall(float jointStrength, float jointDamperScale)
                 drive.maximumForce = Mathf.Infinity;
                 joint.slerpDrive = drive;
             }
+
             // Do not switch all proxy bodies in one physics frame. Releasing
             // them in small batches avoids a visible solver spike while the
             // current pose and zero initial velocities are preserved.
@@ -483,15 +781,24 @@ public void BeginHybridFall(float jointStrength, float jointDamperScale)
                 Rigidbody body = _bodies[i];
                 if (body == null)
                     continue;
+
+                // Unity does not allow assigning velocity to a kinematic body.
+                // Clear velocities while dynamic, then switch to kinematic.
+                if (!body.isKinematic)
+                {
+                    body.linearVelocity = Vector3.zero;
+                    body.angularVelocity = Vector3.zero;
+                }
+
                 body.isKinematic = true;
-                body.useGravity = false;
-                body.linearVelocity = Vector3.zero;
-                body.angularVelocity = Vector3.zero;
+                // Keep gravity active so the floor supplies the reaction
+                // force while recovery targets are being followed.
+                body.useGravity = true;
             }
         }
 
 
-public void ResetToInitialPose()
+        public void ResetToInitialPose()
         {
             if (!_built)
                 return;
@@ -509,6 +816,7 @@ public void ResetToInitialPose()
             }
 
             SetPhysicsActive(false);
+            SetFallColliderMode(false);
             for (int i = 0; i < _bodies.Count; i++)
             {
                 Rigidbody body = _bodies[i];
@@ -522,6 +830,55 @@ public void ResetToInitialPose()
             SyncVisualBonesToProxy();
         }
 
+        /// <summary>
+        /// Freeze the currently settled dynamic ragdoll pose so a recovery
+        /// controller can take ownership without teleporting from a stale
+        /// kinematic pose or carrying residual velocities into the get-up.
+        /// This does not change any body positions or rotations.
+        /// </summary>
+        public bool FreezeCurrentPoseForRecovery()
+        {
+            if (!_built || _bodies.Count == 0)
+                return false;
+
+            Physics.SyncTransforms();
+            _gradualDynamicRelease = false;
+            _dynamicReleaseStep = 0;
+            // Recovery must remain a real ragdoll.  The old implementation
+            // made every proxy kinematic and disabled the rig, which left the
+            // ConfigurableJoints present but physically unsolved.  Preserve
+            // the settled pose by zeroing velocities, then reactivate the
+            // dynamic bodies with gravity temporarily disabled.
+            PhysicsActive = true;
+            for (int i = 0; i < _joints.Count; i++)
+            {
+                ConfigurableJoint joint = _joints[i];
+                if (joint == null)
+                    continue;
+                JointDrive drive = joint.slerpDrive;
+                drive.positionSpring = JointSpring;
+                drive.positionDamper = JointDamper;
+                drive.maximumForce = Mathf.Infinity;
+                joint.slerpDrive = drive;
+            }
+            for (int i = 0; i < _bodies.Count; i++)
+            {
+                Rigidbody body = _bodies[i];
+                if (body == null)
+                    continue;
+
+                bool isRecoveryRoot = BoneMap != null
+                    && BoneMap.hips != null
+                    && body.transform == GetProxyFor(BoneMap.hips);
+                body.isKinematic = isRecoveryRoot;
+                body.useGravity = !isRecoveryRoot;
+                body.linearVelocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
+            Physics.SyncTransforms();
+            return true;
+        }
+
         void SyncVisualBonesToProxy()
         {
             foreach (KeyValuePair<Transform, ProxyBinding> pair in _visualToProxy)
@@ -532,7 +889,7 @@ public void ResetToInitialPose()
 
                 binding.Visual.SetPositionAndRotation(
                     binding.Proxy.TransformPoint(binding.PositionOffsetLocal),
-                    binding.Proxy.rotation * binding.RotationOffsetLocal);
+                    NormalizeRotation(binding.Proxy.rotation * binding.RotationOffsetLocal));
             }
         }
 }

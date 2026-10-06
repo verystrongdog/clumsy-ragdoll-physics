@@ -19,6 +19,8 @@ namespace RaccoonStep
         public Vector3 LookOffset = new Vector3(0f, 0.35f, 0.25f);
         public float FollowSharpness = 10f;
         public float LookSharpness = 12f;
+        [Tooltip("How quickly third-person orbit follows the character's stepped heading.")]
+        public float ThirdPersonYawFollowSharpness = 12f;
 
         [Header("First-person foot view")]
         // This is an overhead leg-observation view rather than a level
@@ -190,6 +192,15 @@ namespace RaccoonStep
                 _stableThirdPersonYaw = Target.eulerAngles.y;
                 _stableThirdPersonInitialized = true;
             }
+
+            // The stepping controller turns the character a few degrees per
+            // landing. Keep the rear offset in the character's current yaw;
+            // otherwise the body turns while the third-person camera remains
+            // locked to the yaw captured in Awake().
+            float yawBlend = 1f - Mathf.Exp(-Mathf.Max(0.01f, ThirdPersonYawFollowSharpness)
+                * Time.unscaledDeltaTime);
+            _stableThirdPersonYaw = Mathf.LerpAngle(
+                _stableThirdPersonYaw, Target.eulerAngles.y, yawBlend);
 
             Vector3 focus = Target.position;
             focus.y = _stableThirdPersonHeight;

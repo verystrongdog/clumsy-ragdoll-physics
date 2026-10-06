@@ -94,6 +94,8 @@ namespace RaccoonStep
 
         public bool IsFalling { get { return _isFalling; } }
         public float FallProgress { get { return _fallProgress; } }
+        public bool IsFallSettled { get { return _isFalling && _fallSettled; } }
+        public bool CanBeginRecovery { get { return IsFallSettled; } }
 
 
         Rigidbody[] _bodies;
@@ -573,7 +575,7 @@ void Update()
                 ResetAfterFall();
         }
 
-void ResetAfterFall()
+        void ResetAfterFall()
         {
             _isFalling = false;
             _unbalancedTime = 0f;
@@ -596,6 +598,24 @@ void ResetAfterFall()
 
             if (Character != null)
                 Character.State = RaccoonStepState.Stable;
+        }
+
+        /// <summary>
+        /// Safe handoff point for a future get-up controller. The settled
+        /// dynamic pose is frozen in place; no standing reset or animation is
+        /// performed here.
+        /// </summary>
+        public bool PrepareForRecovery()
+        {
+            if (!IsFallSettled || PhysicsRig == null)
+                return false;
+
+            if (!PhysicsRig.FreezeCurrentPoseForRecovery())
+                return false;
+
+            if (Character != null)
+                Character.State = RaccoonStepState.Recovering;
+            return true;
         }
 
         void RestoreNeutralUpperBodyPose()

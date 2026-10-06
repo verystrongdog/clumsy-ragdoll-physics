@@ -87,7 +87,7 @@ namespace RaccoonStep
             RaccoonFootController footController = GetComponent<RaccoonFootController>();
             if (footController != null) footController.enabled = false;
             RaccoonBalance balance = GetComponent<RaccoonBalance>();
-            if (balance != null) balance.enabled = false;
+            if (balance != null) balance.enabled = true;
             RaccoonMouseInput mouseInput = GetComponent<RaccoonMouseInput>();
             if (mouseInput != null) mouseInput.enabled = false;
         }
@@ -363,8 +363,8 @@ namespace RaccoonStep
                 levelAxis = transform.forward;
             Vector3 toeTarget = _supportFootWorld + levelAxis * _supportFootLength;
             _supportFootProxy.position = Vector3.Lerp(_supportFootWorld, toeTarget, 0.5f);
-            _supportFootProxy.rotation = _supportFootVisualInitialRotation
-                * Quaternion.Inverse(_supportFootVisualToProxyRotation);
+            _supportFootProxy.rotation = (_supportFootVisualInitialRotation
+                * Quaternion.Inverse(_supportFootVisualToProxyRotation)).normalized;
         }
 
         void SetSegment(Transform proxy, Vector3 start, Vector3 end, Quaternion twist)
@@ -376,7 +376,8 @@ namespace RaccoonStep
             if (axis.sqrMagnitude < 0.000001f)
                 axis = Vector3.up * 0.01f;
             proxy.position = Vector3.Lerp(start, end, 0.5f);
-            proxy.rotation = Quaternion.FromToRotation(Vector3.up, axis.normalized) * twist;
+            proxy.rotation = (Quaternion.FromToRotation(Vector3.up, axis.normalized)
+                * twist).normalized;
         }
     }
 }

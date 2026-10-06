@@ -29,10 +29,18 @@ namespace RaccoonStep
         [Tooltip("Hold duration that reaches MaxStepDistance.")]
         public float MaxPressDuration = 0.45f;
 
+        [Header("Progressive turning")]
+        [Tooltip("Maximum horizontal turn applied during one foot landing.")]
+        public float MaxTurnPerStep = 32f;
+        [Tooltip("Ignore tiny direction differences so straight walking does not yaw.")]
+        public float TurnDeadAngle = 8f;
+
 
         public bool IsReady { get; private set; }
         public bool IsHovering { get; private set; }
         public bool IsSingleSupport { get { return _state == StepState.Lifting || _state == StepState.Hovering || _state == StepState.Landing; } }
+        public bool IsStepping { get { return IsSingleSupport; } }
+        public float StepProgress { get { return Mathf.Clamp01(_progress); } }
         public bool ActiveLegIsLeft { get; private set; }
         public Vector3 SupportFootWorld { get { return _supportFootWorld; } }
 
@@ -67,6 +75,8 @@ namespace RaccoonStep
 
         Vector3 _rootStart;
         Vector3 _rootTarget;
+        Quaternion _rootRotationStart;
+        Quaternion _rootRotationTarget;
         Vector3 _hipLocal;
         Vector3 _initialRootPosition;
         Quaternion _initialRootRotation;
@@ -102,9 +112,11 @@ namespace RaccoonStep
             public float LowerLength;
             public float FootLength;
             public Vector3 FootAxis;
+            public Vector3 FootAxisLocal;
             public Vector3 UpperReferenceForwardLocal;
             public Vector3 LowerReferenceForwardLocal;
             public Quaternion FootVisualRotation;
+            public Quaternion FootLocalRotation;
             public Quaternion FootVisualToProxyRotation;
         }
 
@@ -121,7 +133,9 @@ namespace RaccoonStep
             RaccoonFootController footController = GetComponent<RaccoonFootController>();
             if (footController != null) footController.enabled = false;
             RaccoonBalance balance = GetComponent<RaccoonBalance>();
-            if (balance != null) balance.enabled = false;
+            // Keep balance enabled: it also owns the visible arm-swing pose
+            // used while this alternating controller advances the legs.
+            if (balance != null) balance.enabled = true;
             RaccoonMouseInput mouseInput = GetComponent<RaccoonMouseInput>();
             if (mouseInput != null) mouseInput.enabled = false;
         }
@@ -239,7 +253,9 @@ namespace RaccoonStep
                 LowerLength = Vector3.Distance(lower.position, foot.position),
                 FootLength = Mathf.Max(0.05f, Vector3.Distance(foot.position, toe.position)),
                 FootAxis = (toe.position - foot.position).normalized,
+                FootAxisLocal = transform.InverseTransformDirection((toe.position - foot.position).normalized),
                 FootVisualRotation = foot.rotation,
+                FootLocalRotation = Quaternion.Inverse(transform.rotation) * foot.rotation,
                 FootVisualToProxyRotation = Quaternion.Inverse(footProxy.rotation) * foot.rotation
             };
             if (leg.FootAxis.sqrMagnitude < 0.001f)
@@ -392,6 +408,7 @@ void FixedUpdate()
                 _progress = Mathf.Clamp01(_progress + Time.fixedDeltaTime * GetActionSpeedScale() / Mathf.Max(0.15f, LandingDuration));
                 float blend = _progress * _progress * (3f - 2f * _progress);
                 transform.position = Vector3.Lerp(_rootStart, _rootTarget, blend);
+                transform.rotation = Quaternion.Slerp(_rootRotationStart, _rootRotationTarget, blend);
                 ApplyLegPose(_active, transform.TransformPoint(_active.HipLocal),
                     Vector3.Lerp(_targetGround + Vector3.up * LiftHeight, _targetGround, blend));
                 ApplySupportPose();
@@ -446,8 +463,31 @@ void BeginLanding()
             // placed step and feed back into the balance solver.
             float advance = Mathf.Clamp01(BodyAdvanceFactor);
             _rootTarget = Vector3.Lerp(_rootStart, calibratedTarget, advance);
+            _rootRotationStart = transform.rotation;
+            _rootRotationTarget = CalculateLandingRotation();
             _progress = 0f;
             _state = StepState.Landing;
+        }
+
+        Quaternion CalculateLandingRotation()
+        {
+            Vector3 stepDirection = _targetGround - _active.FootWorld;
+            stepDirection.y = 0f;
+            if (stepDirection.sqrMagnitude < 0.0001f)
+                return _rootRotationStart;
+
+            Vector3 forward = transform.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f)
+                forward = Vector3.forward;
+            forward.Normalize();
+
+            float signedAngle = Vector3.SignedAngle(forward, stepDirection.normalized, Vector3.up);
+            if (Mathf.Abs(signedAngle) <= Mathf.Max(0f, TurnDeadAngle))
+                return _rootRotationStart;
+
+            float limitedAngle = Mathf.Clamp(signedAngle, -Mathf.Abs(MaxTurnPerStep), Mathf.Abs(MaxTurnPerStep));
+            return (Quaternion.AngleAxis(limitedAngle, Vector3.up) * _rootRotationStart).normalized;
         }
 
 bool TryGetGroundTarget(out Vector3 target)
@@ -534,12 +574,15 @@ bool TryGetGroundTarget(out Vector3 target)
                 transform.TransformDirection(leg.UpperReferenceForwardLocal));
             SetSegment(leg.LowerProxy, knee, ankle,
                 transform.TransformDirection(leg.LowerReferenceForwardLocal));
-            Vector3 footAxis = Vector3.ProjectOnPlane(leg.FootAxis, Vector3.up).normalized;
+            Vector3 footAxis = Vector3.ProjectOnPlane(
+                transform.TransformDirection(leg.FootAxisLocal), Vector3.up).normalized;
             if (footAxis.sqrMagnitude < 0.0001f)
                 footAxis = transform.forward;
             Vector3 toe = ankle + footAxis * leg.FootLength;
             leg.FootProxy.position = Vector3.Lerp(ankle, toe, 0.5f);
-            leg.FootProxy.rotation = leg.FootVisualRotation * Quaternion.Inverse(leg.FootVisualToProxyRotation);
+            Quaternion footWorldRotation = transform.rotation * leg.FootLocalRotation;
+            leg.FootProxy.rotation = (footWorldRotation
+                * Quaternion.Inverse(leg.FootVisualToProxyRotation)).normalized;
         }
 
         void SetSegment(Transform proxy, Vector3 start, Vector3 end, Vector3 referenceForward)
