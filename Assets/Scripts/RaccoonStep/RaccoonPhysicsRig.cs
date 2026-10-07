@@ -37,6 +37,12 @@ namespace RaccoonStep
         public int ProxySolverVelocityIterations = 12;
         [Tooltip("Caps the speed used to resolve accidental collider overlap.")]
         public float ProxyMaxDepenetrationVelocity = 0.5f;
+        [Tooltip("Safety cap for recovery proxy speed so a long mouse hold cannot launch the ragdoll.")]
+        public float RecoveryMaxLinearSpeed = 2.5f;
+        [Tooltip("Additional cap for upward recovery speed. Prevents repeated mouse pulls from launching the pelvis while still allowing the planned stand-up motion.")]
+        public float RecoveryMaxUpwardSpeed = 0.75f;
+        [Tooltip("Safety cap for recovery proxy angular speed so repeated drives remain stable.")]
+        public float RecoveryMaxAngularSpeed = 8f;
         [Tooltip("Number of fixed steps used to hand proxy bodies to dynamic physics during a fall.")]
         public int HybridReleaseFixedSteps = 3;
 
@@ -59,7 +65,19 @@ namespace RaccoonStep
         public int JointCount { get; private set; }
         public Transform PhysicsRoot { get; private set; }
 
+        /// <summary>World-Y position of a foot proxy whose capsule bottom is
+        /// exactly on the supplied ground plane. The foot bone target is not
+        /// the same as the collider contact point because the capsule has an
+        /// upward local offset.</summary>
+        public float RecoveryFootContactHeight(float groundHeight)
+        {
+            return groundHeight - FootColliderLift + FootColliderRadius;
+        }
+
         readonly Dictionary<Transform, ProxyBinding> _visualToProxy = new Dictionary<Transform, ProxyBinding>();
+        readonly RaccoonProxyRegistry _proxyRegistry = new RaccoonProxyRegistry();
+        ConfigurableJoint _recoverySpineJoint;
+        ConfigurableJoint _recoveryOriginalSpineJoint;
         readonly List<Rigidbody> _bodies = new List<Rigidbody>();
         readonly List<Collider> _colliders = new List<Collider>();
         readonly List<float> _baseColliderRadii = new List<float>();
@@ -86,6 +104,30 @@ namespace RaccoonStep
                 Build();
         }
 
+        void OnDestroy()
+        {
+            EndRecoverySpineJoint();
+            _proxyRegistry.Clear();
+            if (_fallBakedMesh != null)
+            {
+                if (Application.isPlaying)
+                    Destroy(_fallBakedMesh);
+                else
+                    DestroyImmediate(_fallBakedMesh);
+                _fallBakedMesh = null;
+            }
+
+            if (PhysicsRoot != null)
+            {
+                GameObject root = PhysicsRoot.gameObject;
+                PhysicsRoot = null;
+                if (Application.isPlaying)
+                    Destroy(root);
+                else
+                    DestroyImmediate(root);
+            }
+        }
+
         void FixedUpdate()
         {
             if (!_gradualDynamicRelease || !_built || _bodies.Count == 0)
@@ -104,14 +146,7 @@ namespace RaccoonStep
 
         void EnsurePhysicsSimulation()
         {
-            if (!ConfigurePhysicsSimulation)
-                return;
-
-            if (Physics.simulationMode != SimulationMode.FixedUpdate)
-            {
-                Physics.simulationMode = SimulationMode.FixedUpdate;
-                Debug.Log("[RaccoonStep] Enabled automatic FixedUpdate physics simulation.", this);
-            }
+            RaccoonPhysicsLifecycle.EnsureAutomaticSimulation(ConfigurePhysicsSimulation, this);
         }
 
         [ContextMenu("Build Physics Proxy Rig")]
@@ -200,13 +235,7 @@ namespace RaccoonStep
             PhysicsActive = active;
             _gradualDynamicRelease = false;
             _dynamicReleaseStep = 0;
-            for (int i = 0; i < _bodies.Count; i++)
-            {
-                Rigidbody body = _bodies[i];
-                if (body == null) continue;
-                body.isKinematic = !active;
-                body.useGravity = active;
-            }
+            RaccoonPhysicsLifecycle.SetBodiesActive(_bodies, active);
         }
 
         void ActivateDynamicBody(Rigidbody body)
@@ -424,9 +453,50 @@ namespace RaccoonStep
                 return null;
 
             ProxyBinding binding;
-            return _visualToProxy.TryGetValue(visualBone, out binding) && binding != null
-                ? binding.Proxy
-                : null;
+            if (_visualToProxy.TryGetValue(visualBone, out binding) && binding != null)
+                return binding.Proxy;
+
+            Transform registeredProxy;
+            if (_proxyRegistry.TryGet(visualBone, out registeredProxy))
+                return registeredProxy;
+
+            // Domain reloads can preserve the runtime proxy hierarchy while
+            // clearing this non-serialized dictionary. Rebuild the requested
+            // binding from the stable proxy names instead of silently making
+            // recovery a no-op.
+            if (PhysicsRoot == null || BoneMap == null)
+                return null;
+            string proxyName = ProxyNameFor(visualBone);
+            if (string.IsNullOrEmpty(proxyName))
+                return null;
+            Transform proxy = _proxyRegistry.FindOrRegister(visualBone, PhysicsRoot, proxyName);
+            if (proxy == null)
+                return null;
+            _visualToProxy[visualBone] = new ProxyBinding(visualBone, proxy);
+            _proxyRegistry.Register(visualBone, proxy);
+            return proxy;
+        }
+
+        string ProxyNameFor(Transform visualBone)
+        {
+            if (BoneMap == null || visualBone == null)
+                return null;
+            if (visualBone == BoneMap.hips) return "HipsBody";
+            if (visualBone == BoneMap.spine) return "SpineBody";
+            if (visualBone == BoneMap.head) return "HeadBody";
+            if (visualBone == BoneMap.leftUpperLeg) return "LeftUpperLegBody";
+            if (visualBone == BoneMap.leftLowerLeg) return "LeftLowerLegBody";
+            if (visualBone == BoneMap.leftFoot) return "LeftFootBody";
+            if (visualBone == BoneMap.rightUpperLeg) return "RightUpperLegBody";
+            if (visualBone == BoneMap.rightLowerLeg) return "RightLowerLegBody";
+            if (visualBone == BoneMap.rightFoot) return "RightFootBody";
+            if (visualBone == BoneMap.leftUpperArm) return "LeftUpperArmBody";
+            if (visualBone == BoneMap.leftLowerArm) return "LeftLowerArmBody";
+            if (visualBone == BoneMap.leftHand) return "LeftHandBody";
+            if (visualBone == BoneMap.rightUpperArm) return "RightUpperArmBody";
+            if (visualBone == BoneMap.rightLowerArm) return "RightLowerArmBody";
+            if (visualBone == BoneMap.rightHand) return "RightHandBody";
+            return null;
         }
 
         /// <summary>
@@ -469,7 +539,312 @@ namespace RaccoonStep
             DriveRecoveryBody(body, targetPosition, targetRotation);
         }
 
+        /// <summary>Scaled version used when contact points (hands/feet) are
+        /// expected to contribute to a recovery motion. It keeps the target
+        /// physical while avoiding a full-strength invisible position pull.</summary>
+        public void DriveRecoveryPointScaled(Transform proxy, Vector3 targetPosition,
+            Quaternion targetRotation, float strength)
+        {
+            if (proxy == null)
+                return;
+            Rigidbody body = proxy.GetComponent<Rigidbody>();
+            if (body == null)
+                return;
+            if (body.isKinematic)
+            {
+                body.MovePosition(targetPosition);
+                body.MoveRotation(targetRotation);
+                return;
+            }
+            DriveRecoveryBody(body, targetPosition, targetRotation,
+                Mathf.Clamp01(strength));
+        }
+
+        /// <summary>
+        /// Drives only a dynamic proxy's orientation. Recovery uses this for
+        /// the first torso phase so the locked joint anchors preserve the
+        /// spine/head/arm distances and the ragdoll remains physically solved.
+        /// </summary>
+        public void DriveRecoveryRotation(Transform proxy, Quaternion targetRotation, float strength = 1f)
+        {
+            if (proxy == null || strength <= 0f)
+                return;
+            Rigidbody body = proxy.GetComponent<Rigidbody>();
+            if (body == null || body.isKinematic)
+                return;
+
+            Quaternion delta = targetRotation * Quaternion.Inverse(body.rotation);
+            delta.ToAngleAxis(out float angle, out Vector3 axis);
+            if (angle > 180f) angle -= 360f;
+            if (axis.sqrMagnitude < 0.000001f)
+                return;
+
+            Vector3 rotationAxis = axis.normalized;
+            float angleRadians = angle * Mathf.Deg2Rad;
+            float axisSpeed = Vector3.Dot(body.angularVelocity, rotationAxis);
+            float driveStrength = Mathf.Clamp01(strength);
+            // The spine has to rotate a connected upper-body mass while it
+            // is still touching the floor.  The old gain was too small: it
+            // produced a visible twitch, then the contact/joint solver
+            // cancelled the remaining angular velocity.  Keep this as a
+            // bounded velocity correction, but give it enough authority to
+            // overcome the resting-contact torque.
+            float requestedDeltaSpeed = angleRadians * 14.0f * driveStrength
+                - axisSpeed * 1.6f * driveStrength;
+            Vector3 velocityChange = rotationAxis
+                * Mathf.Clamp(requestedDeltaSpeed, -25.0f * driveStrength, 25.0f * driveStrength);
+            // A bounded angular-velocity correction is more reliable here
+            // than acceleration on a dynamically constrained ConfigurableJoint.
+            // It remains a Rigidbody drive and never writes Transform.rotation.
+            body.AddTorque(velocityChange, ForceMode.VelocityChange);
+            body.angularVelocity = Vector3.ClampMagnitude(body.angularVelocity, Mathf.Max(0.1f, RecoveryMaxAngularSpeed));
+        }
+
+        public void DriveRecoveryUpright(Transform proxy, float strength = 1f)
+        {
+            if (proxy == null || strength <= 0f) return;
+            Rigidbody body = proxy.GetComponent<Rigidbody>();
+            if (body == null || body.isKinematic) return;
+            Vector3 axisError = Vector3.Cross(proxy.up, Vector3.up);
+            float sin = axisError.magnitude;
+            if (sin < 0.0001f) return;
+            float angle = Mathf.Asin(Mathf.Clamp(sin, -1f, 1f));
+            Vector3 correctionAxis = axisError / sin;
+            float s = Mathf.Clamp01(strength);
+            // The joint solver consumes ordinary acceleration torque while
+            // the torso is in floor contact. Use a bounded velocity change,
+            // continuously refreshed each FixedUpdate, so the correction is
+            // applied after the solver has resolved the previous step.
+            float requestedSpeed = Mathf.Clamp(angle * 10f
+                - Vector3.Dot(body.angularVelocity, correctionAxis) * 0.8f,
+                -12f, 12f) * s;
+            body.AddTorque(correctionAxis * requestedSpeed, ForceMode.VelocityChange);
+            body.angularVelocity = Vector3.ClampMagnitude(body.angularVelocity, Mathf.Max(0.1f, RecoveryMaxAngularSpeed));
+        }
+
+        /// <summary>Physics-joint target drive used for the torso recovery.
+        /// The body remains dynamic; the ConfigurableJoint solver applies the
+        /// corrective rotation instead of an external torque being cancelled
+        /// by the same solver.</summary>
+        public void DriveRecoveryJointTarget(Transform proxy, Quaternion worldTarget, float strength = 1f)
+        {
+            if (proxy == null) return;
+            ConfigurableJoint joint = proxy.GetComponent<ConfigurableJoint>();
+            if (joint == null) return;
+            joint.angularXMotion = ConfigurableJointMotion.Free;
+            joint.angularYMotion = ConfigurableJointMotion.Free;
+            joint.angularZMotion = ConfigurableJointMotion.Free;
+            joint.rotationDriveMode = RotationDriveMode.Slerp;
+            joint.configuredInWorldSpace = false;
+            JointDrive drive = joint.slerpDrive;
+            float s = Mathf.Clamp01(strength);
+            drive.positionSpring = Mathf.Lerp(0f, 1800f, s);
+            drive.positionDamper = Mathf.Lerp(0f, 180f, s);
+            drive.maximumForce = Mathf.Infinity;
+            joint.slerpDrive = drive;
+            Rigidbody parent = joint.connectedBody;
+            Quaternion parentRotation = parent != null ? parent.rotation : Quaternion.identity;
+            Quaternion currentRelative = Quaternion.Inverse(parentRotation) * proxy.rotation;
+            Quaternion desiredRelative = Quaternion.Inverse(parentRotation) * worldTarget;
+            Quaternion jointSpace = Quaternion.LookRotation(joint.axis, joint.secondaryAxis);
+            joint.targetRotation = Quaternion.Inverse(jointSpace)
+                * Quaternion.Inverse(desiredRelative) * currentRelative * jointSpace;
+        }
+
+        public void BeginRecoverySpineJoint(Transform spine, Transform hips)
+        {
+            EndRecoverySpineJoint();
+            if (spine == null || hips == null) return;
+            _recoveryOriginalSpineJoint = spine.GetComponent<ConfigurableJoint>();
+            _recoverySpineJoint = RaccoonRecoveryJoint.Create(spine, hips, _recoveryOriginalSpineJoint);
+        }
+
+        public void DriveRecoverySpineJoint(Quaternion worldTarget, float strength = 1f)
+        {
+            if (_recoverySpineJoint == null) return;
+            RaccoonRecoveryJoint.Drive(_recoverySpineJoint, worldTarget, strength);
+        }
+
+        public void SetRecoverySpineDrive(bool enabled)
+        {
+            RaccoonRecoveryJoint.SetDriveEnabled(_recoverySpineJoint, enabled);
+        }
+
+        public void EndRecoverySpineJoint()
+        {
+            RaccoonRecoveryJoint.Release(_recoverySpineJoint);
+            _recoverySpineJoint = null;
+            _recoveryOriginalSpineJoint = null;
+        }
+
+        public void SetRecoveryTorsoMotion(Transform spine, bool enabled)
+        {
+            if (spine == null)
+                return;
+            ConfigurableJoint joint = spine.GetComponent<ConfigurableJoint>();
+            if (joint == null)
+                return;
+
+            if (enabled)
+            {
+                // A fallen torso can be rotated far beyond the small walking
+                // posture limits. The joint remains connected; only its
+                // angular range is opened for this recovery phase.
+                joint.angularXMotion = ConfigurableJointMotion.Free;
+                joint.angularYMotion = ConfigurableJointMotion.Free;
+                joint.angularZMotion = ConfigurableJointMotion.Free;
+                JointDrive recoveryDrive = joint.slerpDrive;
+                recoveryDrive.positionSpring = 0f;
+                recoveryDrive.positionDamper = 0f;
+                recoveryDrive.maximumForce = 0f;
+                joint.slerpDrive = recoveryDrive;
+
+                // Unity's default angular-velocity cap (typically 7 rad/s)
+                // is too restrictive for the first impulse when the torso is
+                // lying against the floor.  Without raising it, the applied
+                // velocity correction is clipped before it can overcome the
+                // resting contact.  This is restored when recovery ends.
+                Rigidbody body = spine.GetComponent<Rigidbody>();
+                if (body != null)
+                    body.maxAngularVelocity = 30f;
+            }
+            else
+            {
+                joint.configuredInWorldSpace = false;
+                joint.angularXMotion = ConfigurableJointMotion.Limited;
+                joint.angularYMotion = ConfigurableJointMotion.Limited;
+                joint.angularZMotion = ConfigurableJointMotion.Limited;
+                joint.lowAngularXLimit = new SoftJointLimit { limit = -35f };
+                joint.highAngularXLimit = new SoftJointLimit { limit = 35f };
+                joint.angularYLimit = new SoftJointLimit { limit = 35f };
+                joint.angularZLimit = new SoftJointLimit { limit = 35f };
+                JointDrive normalDrive = joint.slerpDrive;
+                normalDrive.positionSpring = JointSpring;
+                normalDrive.positionDamper = JointDamper;
+                normalDrive.maximumForce = Mathf.Infinity;
+                joint.slerpDrive = normalDrive;
+                Rigidbody body = spine.GetComponent<Rigidbody>();
+                if (body != null)
+                    body.maxAngularVelocity = 7f;
+            }
+        }
+
+        /// <summary>
+        /// Opens the angular range of a leg chain for IK recovery. Normal
+        /// walking uses a narrow +/-35 degree limit on every proxy joint;
+        /// that limit prevents the hip and knee rigidbodies from reaching the
+        /// folded seated pose even when the IK target is correct.
+        /// </summary>
+        public void SetRecoveryLegMotion(Transform upperLeg, Transform lowerLeg,
+            Transform foot, bool enabled)
+        {
+            SetRecoveryLimbJointMotion(upperLeg, enabled);
+            SetRecoveryLimbJointMotion(lowerLeg, enabled);
+            SetRecoveryLimbJointMotion(foot, enabled);
+        }
+
+        void SetRecoveryLimbJointMotion(Transform limb, bool enabled)
+        {
+            if (limb == null)
+                return;
+            ConfigurableJoint joint = limb.GetComponent<ConfigurableJoint>();
+            if (joint == null)
+                return;
+
+            if (enabled)
+            {
+                joint.angularXMotion = ConfigurableJointMotion.Free;
+                joint.angularYMotion = ConfigurableJointMotion.Free;
+                joint.angularZMotion = ConfigurableJointMotion.Free;
+                JointDrive drive = joint.slerpDrive;
+                drive.positionSpring = 0f;
+                drive.positionDamper = 0f;
+                drive.maximumForce = 0f;
+                joint.slerpDrive = drive;
+            }
+            else
+            {
+                joint.angularXMotion = ConfigurableJointMotion.Limited;
+                joint.angularYMotion = ConfigurableJointMotion.Limited;
+                joint.angularZMotion = ConfigurableJointMotion.Limited;
+                joint.lowAngularXLimit = new SoftJointLimit { limit = -35f };
+                joint.highAngularXLimit = new SoftJointLimit { limit = 35f };
+                joint.angularYLimit = new SoftJointLimit { limit = 35f };
+                joint.angularZLimit = new SoftJointLimit { limit = 35f };
+                JointDrive drive = joint.slerpDrive;
+                drive.positionSpring = JointSpring;
+                drive.positionDamper = JointDamper;
+                drive.maximumForce = Mathf.Infinity;
+                joint.slerpDrive = drive;
+            }
+        }
+
+        /// <summary>Controls gravity during recovery. The pelvis is deliberately
+        /// not exempt: exempting the root lets the recovery drives accumulate
+        /// upward momentum and launch the whole ragdoll on a long mouse hold.</summary>
+        public void SetRecoveryGravity(bool enabled)
+        {
+            for (int i = 0; i < _bodies.Count; i++)
+            {
+                Rigidbody body = _bodies[i];
+                if (body == null) continue;
+                body.useGravity = enabled;
+            }
+        }
+
+        /// <summary>
+        /// Keeps a recovery foot collider on the configured floor plane. The
+        /// IK target is the foot-bone position, while contact is determined by
+        /// the collider bounds; confusing those two heights leaves an obvious
+        /// air gap or makes the PD drive push the body upward indefinitely.
+        /// </summary>
+        public void ClampRecoveryFootToGround(Transform foot, float groundHeight)
+        {
+            if (foot == null)
+                return;
+
+            Rigidbody body = foot.GetComponent<Rigidbody>();
+            Collider collider = foot.GetComponent<Collider>();
+            if (body == null || collider == null)
+                return;
+
+            float correction = groundHeight - collider.bounds.min.y;
+            if (Mathf.Abs(correction) > 0.001f && Mathf.Abs(correction) < 0.12f)
+                body.position += Vector3.up * correction;
+
+            // A foot that is already on the floor must never carry upward
+            // velocity into the next drive tick. Downward velocity is left to
+            // the contact solver and gravity.
+            if (collider.bounds.min.y <= groundHeight + 0.004f && body.linearVelocity.y > 0f)
+            {
+                Vector3 velocity = body.linearVelocity;
+                velocity.y = 0f;
+                body.linearVelocity = velocity;
+            }
+        }
+
+        public void SetRecoveryJointDrives(bool enabled)
+        {
+            for (int i = 0; i < _joints.Count; i++)
+            {
+                ConfigurableJoint joint = _joints[i];
+                if (joint == null)
+                    continue;
+                JointDrive drive = joint.slerpDrive;
+                drive.positionSpring = enabled ? JointSpring : 0f;
+                drive.positionDamper = enabled ? JointDamper : 0f;
+                drive.maximumForce = enabled ? Mathf.Infinity : 0f;
+                joint.slerpDrive = drive;
+            }
+        }
+
         void DriveRecoveryBody(Rigidbody body, Vector3 targetPosition, Quaternion targetRotation)
+        {
+            DriveRecoveryBody(body, targetPosition, targetRotation, 1f);
+        }
+
+        void DriveRecoveryBody(Rigidbody body, Vector3 targetPosition, Quaternion targetRotation,
+            float strength)
         {
             const float positionSpring = 70f;
             const float positionDamper = 18f;
@@ -477,6 +852,7 @@ namespace RaccoonStep
             const float rotationDamper = 14f;
             Vector3 force = (targetPosition - body.position) * positionSpring
                 - body.linearVelocity * positionDamper;
+            force *= Mathf.Clamp01(strength);
             if (force.sqrMagnitude > 36f)
                 force = force.normalized * 6f;
             body.AddForce(force, ForceMode.Acceleration);
@@ -488,10 +864,19 @@ namespace RaccoonStep
             {
                 Vector3 torque = axis.normalized * (angle * Mathf.Deg2Rad * rotationSpring)
                     - body.angularVelocity * rotationDamper;
+                torque *= Mathf.Clamp01(strength);
                 if (torque.sqrMagnitude > 36f)
                     torque = torque.normalized * 6f;
                 body.AddTorque(torque, ForceMode.Acceleration);
             }
+            body.linearVelocity = Vector3.ClampMagnitude(body.linearVelocity, Mathf.Max(0.1f, RecoveryMaxLinearSpeed));
+            if (body.linearVelocity.y > Mathf.Max(0.05f, RecoveryMaxUpwardSpeed))
+            {
+                Vector3 velocity = body.linearVelocity;
+                velocity.y = Mathf.Max(0.05f, RecoveryMaxUpwardSpeed);
+                body.linearVelocity = velocity;
+            }
+            body.angularVelocity = Vector3.ClampMagnitude(body.angularVelocity, Mathf.Max(0.1f, RecoveryMaxAngularSpeed));
         }
 
         /// <summary>
@@ -627,16 +1012,16 @@ ProxyPart CreatePart(string name, Transform visualBone, Transform visualChild, f
             Transform proxy = go.transform;
             proxy.SetParent(PhysicsRoot, true);
 
-            Vector3 start = visualBone.position;
-            Vector3 end = visualChild != null ? visualChild.position : start + visualBone.up * 0.12f;
-            Vector3 axis = end - start;
-            float length = Mathf.Max(0.08f, axis.magnitude);
-            Vector3 midpoint = Vector3.Lerp(start, end, 0.5f);
+            Vector3 start;
+            Vector3 end;
+            Vector3 midpoint;
+            Quaternion rotation;
+            float length;
+            RaccoonProxyBuilder.GetSegmentPose(visualBone, visualChild,
+                out start, out end, out midpoint, out rotation, out length);
 
             proxy.position = midpoint;
-            proxy.rotation = axis.sqrMagnitude > 0.0001f
-                ? Quaternion.FromToRotation(Vector3.up, axis.normalized)
-                : visualBone.rotation;
+            proxy.rotation = rotation;
             proxy.localScale = Vector3.one;
 
             float colliderRadius = radius;
@@ -652,20 +1037,11 @@ ProxyPart CreatePart(string name, Transform visualBone, Transform visualChild, f
             }
 
             CapsuleCollider capsule = go.AddComponent<CapsuleCollider>();
-            capsule.direction = 1;
-            capsule.radius = colliderRadius;
-            capsule.height = length + colliderRadius * 2f;
-            capsule.center = colliderCenter;
+            RaccoonProxyBuilder.ConfigureCapsule(capsule, colliderRadius, length, colliderCenter);
 
             Rigidbody body = go.AddComponent<Rigidbody>();
-            body.mass = Mathf.Max(mass, MinimumProxyMass);
-            body.interpolation = RigidbodyInterpolation.Interpolate;
-            body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-            body.maxDepenetrationVelocity = Mathf.Max(0.01f, ProxyMaxDepenetrationVelocity);
-            body.solverIterations = Mathf.Max(1, ProxySolverIterations);
-            body.solverVelocityIterations = Mathf.Max(1, ProxySolverVelocityIterations);
-            body.isKinematic = true;
-            body.useGravity = false;
+            RaccoonProxyBuilder.ConfigureBody(body, mass, MinimumProxyMass,
+                ProxySolverIterations, ProxySolverVelocityIterations, ProxyMaxDepenetrationVelocity);
 
             _bodies.Add(body);
             _colliders.Add(capsule);
@@ -678,11 +1054,7 @@ ProxyPart CreatePart(string name, Transform visualBone, Transform visualChild, f
 
         void IgnoreInternalCollisions()
         {
-            for (int i = 0; i < _colliders.Count; i++)
-            {
-                for (int j = i + 1; j < _colliders.Count; j++)
-                    Physics.IgnoreCollision(_colliders[i], _colliders[j], true);
-            }
+            RaccoonProxyRegistry.IgnoreInternalCollisions(_colliders);
         }
 
         void Connect(ProxyPart child, ProxyPart parent, bool allowFootTranslation)
@@ -691,30 +1063,8 @@ ProxyPart CreatePart(string name, Transform visualBone, Transform visualChild, f
                 return;
 
             ConfigurableJoint joint = child.Transform.gameObject.AddComponent<ConfigurableJoint>();
-            joint.connectedBody = parent.Body;
-            joint.autoConfigureConnectedAnchor = false;
-            Vector3 jointWorldPosition = child.Start;
-            joint.anchor = child.Transform.InverseTransformPoint(jointWorldPosition);
-            joint.connectedAnchor = parent.Transform.InverseTransformPoint(jointWorldPosition);
-            joint.xMotion = allowFootTranslation ? ConfigurableJointMotion.Free : ConfigurableJointMotion.Locked;
-            joint.yMotion = allowFootTranslation ? ConfigurableJointMotion.Free : ConfigurableJointMotion.Locked;
-            joint.zMotion = allowFootTranslation ? ConfigurableJointMotion.Free : ConfigurableJointMotion.Locked;
-            joint.angularXMotion = ConfigurableJointMotion.Limited;
-            joint.angularYMotion = ConfigurableJointMotion.Limited;
-            joint.angularZMotion = ConfigurableJointMotion.Limited;
-            joint.lowAngularXLimit = new SoftJointLimit { limit = -35f };
-            joint.highAngularXLimit = new SoftJointLimit { limit = 35f };
-            joint.angularYLimit = new SoftJointLimit { limit = 35f };
-            joint.angularZLimit = new SoftJointLimit { limit = 35f };
-            joint.rotationDriveMode = RotationDriveMode.Slerp;// Projection disabled to avoid contact bounce.
-
-
-            joint.slerpDrive = new JointDrive
-            {
-                positionSpring = JointSpring,
-                positionDamper = JointDamper,
-                maximumForce = Mathf.Infinity
-            };
+            RaccoonJointConfigurator.Configure(joint, parent.Body, child.Start,
+                allowFootTranslation, JointSpring, JointDamper);
 
             _joints.Add(joint);
 
@@ -867,11 +1217,12 @@ public void BeginHybridFall(float jointStrength, float jointDamperScale)
                 if (body == null)
                     continue;
 
-                bool isRecoveryRoot = BoneMap != null
-                    && BoneMap.hips != null
-                    && body.transform == GetProxyFor(BoneMap.hips);
-                body.isKinematic = isRecoveryRoot;
-                body.useGravity = !isRecoveryRoot;
+                // Keep the pelvis dynamic during recovery. Its position is
+                // held by the recovery PD target, while its rotation is part
+                // of the torso solve instead of being an invisible kinematic
+                // anchor that leaves only the neck visibly rotating.
+                body.isKinematic = false;
+                body.useGravity = true;
                 body.linearVelocity = Vector3.zero;
                 body.angularVelocity = Vector3.zero;
             }

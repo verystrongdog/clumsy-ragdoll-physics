@@ -4,62 +4,6 @@ using UnityEngine;
 
 namespace ClumsyRagdoll
 {
-    /// <summary>
-    /// 一个物理部件 = 一根骨头 + Rigidbody + ConfigurableJoint + Collider。
-    /// 来源：教程 P1 步3「全选所有骨骼 → Add Component → ConfigurableJoint」。
-    /// </summary>
-    public sealed class ClumsyPart
-    {
-        public PartSpec Spec;
-        public Transform Bone;
-        public Rigidbody Body;
-        public ConfigurableJoint Joint;
-        public Collider Shape;
-
-        /// <summary>本次构建实际使用的角驱动刚度。</summary>
-        public float Spring;
-
-        /// <summary>本骨到「链上子骨」的世界长度（末端部件为到最近子物体的距离）。</summary>
-        public float Length;
-
-        /// <summary>角色右方 / 上方，换算到本骨局部坐标 —— targetRotation 的旋转轴就写在这两个向量上。</summary>
-        public Vector3 LocalRight;
-        public Vector3 LocalUp;
-
-        public Vector3 RestPosition;
-        public Quaternion RestRotation;
-
-        /// <summary>
-        /// 出生时的**局部**旋转，且是「相对于关节的 connectedBody」而不是 Transform 父亲。
-        /// 手部两骨 IK 要把「想让它朝哪」的世界旋转换算回 ConfigurableJoint.targetRotation，
-        /// 换算式的右边就是它（推导见 ClumsyArmIK.JointTargetFromWorld）。
-        /// 运行期 bone.localRotation 已经变了，所以必须在搭骨的时候存下来。
-        /// </summary>
-        public Quaternion RestLocalToBody;
-
-        /// <summary>出生时相对 Transform 父亲的局部旋转（诊断用，与上面那个应当一致）。</summary>
-        public Quaternion RestLocal;
-
-        /// <summary>本骨属于手臂链（肩/上臂/小臂/手）—— 肘解锁与两骨 IK 都按这个判。</summary>
-        public bool IsArmChain
-        {
-            get
-            {
-                string k = Spec.Key;
-                return k.StartsWith("shoulder") || k.StartsWith("arm")
-                    || k.StartsWith("forearm") || k.StartsWith("hand");
-            }
-        }
-
-        /// <summary>小臂与手（肘以下）—— FreeElbowAngular 只管这两个。</summary>
-        public bool IsElbowDownstream
-        {
-            get { return Spec.Key.StartsWith("forearm") || Spec.Key.StartsWith("hand"); }
-        }
-
-        public bool IsPelvis { get { return Spec.Role == PartRole.Pelvis; } }
-        public bool HasJoint { get { return Joint != null; } }
-    }
 
     /// <summary>
     /// 教程版布娃娃本体。
@@ -115,6 +59,9 @@ namespace ClumsyRagdoll
         public float GroundY;
 
         public PhysicsMaterial SlideMaterial;
+
+        readonly RagdollJointConfigurator _jointConfigurator =
+            new RagdollJointConfigurator();
 
         /// <summary>落地判定，由 LimbCollision 写入（教程 P3 步8）。</summary>
         public bool IsGrounded;
@@ -300,7 +247,14 @@ public void Rebuild()
                 ClumsyPart part = resolved[i];
                 ConfigurableJoint joint = CreateJoint(part, byKey);
                 part.Joint = joint;
-                ConfigureDrives(part, joint, i);
+                _jointConfigurator.Configure(
+                    part,
+                    joint,
+                    Recipe,
+                    HipsSpring,
+                    LimbSpring,
+                    UpperSpring,
+                    TorsoSpring);
             }
 
             // ---- 存下「相对于 connectedBody」的出生局部旋转（手部 IK 换算要用，见 ClumsyPart.RestLocalToBody）
@@ -556,31 +510,29 @@ public void Rebuild()
             SetDriveSpring(part, k, Recipe != null ? Recipe.DampingRatio : 0f);
         }
 
+        // 兼容运行期调参入口；弹簧分档策略由 RagdollJointConfigurator 统一维护。
+        float SpringFor(ClumsyPart part)
+        {
+            return _jointConfigurator.GetSpring(
+                part,
+                Recipe,
+                HipsSpring,
+                LimbSpring,
+                UpperSpring,
+                TorsoSpring);
+        }
+
         /// <summary>★ 2026-10-02 带显式阻尼比的版本（搬运加硬用，见 SetSpringScale 的重载）。</summary>
         void SetDriveSpring(ClumsyPart part, float k, float dampingRatio)
         {
             if (part == null || part.Joint == null)
                 return;
-            part.Spring = k;
-            float damper = 0f;
-            if (dampingRatio > 0f && part.Body != null)
-            {
-                Vector3 inertia = part.Body.inertiaTensor;
-                float iref = Mathf.Max(inertia.x, Mathf.Max(inertia.y, inertia.z));
-                damper = 2f * dampingRatio * Mathf.Sqrt(Mathf.Max(k * iref, 1e-6f));
-            }
-            JointDrive x = part.Joint.angularXDrive;
-            x.positionSpring = k;
-            x.positionDamper = damper;
-            if (Recipe.MaxDriveForce > 0f)
-                x.maximumForce = Recipe.MaxDriveForce;
-            part.Joint.angularXDrive = x;
-            JointDrive yz = part.Joint.angularYZDrive;
-            yz.positionSpring = k;
-            yz.positionDamper = damper;
-            if (Recipe.MaxDriveForce > 0f)
-                yz.maximumForce = Recipe.MaxDriveForce;
-            part.Joint.angularYZDrive = yz;
+            _jointConfigurator.ConfigureSpring(
+                part,
+                part.Joint,
+                Recipe,
+                k,
+                dampingRatio);
         }
 
         ConfigurableJoint CreateJoint(ClumsyPart part, Dictionary<string, ClumsyPart> byKey)
@@ -653,55 +605,6 @@ public void Rebuild()
             return joint;
         }
 
-        /// <summary>这个关节该用多大的弹簧：hips 一档；躯干（脊/颈/头）一档；上半身一档；四肢（大腿/小腿/脚）一档。</summary>
-        float SpringFor(ClumsyPart part)
-        {
-            if (part.IsPelvis)
-            {
-                // 教程 §三：只要不用「稳定器关节」这条弹簧，它就必须归零 ——
-                // UprightTorque 是自己施加力矩；None 是「什么都不撑」（有弹簧就不是对照组了）。
-                if (Recipe != null && Recipe.Balance != BalanceMode.StabilizerJoint)
-                    return 0f;
-                return HipsSpring;
-            }
-            string k = part.Spec.Key;
-            if (k.StartsWith("shoulder") || k.StartsWith("arm") || k.StartsWith("forearm") || k.StartsWith("hand"))
-                return UpperSpring;
-            if (k == "spine" || k == "neck" || k == "head")
-                return TorsoSpring;      // ★ 2026-10-01：躯干与腿拆档，见 TorsoSpring 的注释
-            return LimbSpring;
-        }
-
-        void ConfigureDrives(ClumsyPart part, ConfigurableJoint joint, int index)
-        {
-            float k = SpringFor(part);
-            part.Spring = k;
-
-            float damper = 0f;
-            if (Recipe.DampingRatio > 0f && part.Body != null)
-            {
-                Vector3 inertia = part.Body.inertiaTensor;
-                float iref = Mathf.Max(inertia.x, Mathf.Max(inertia.y, inertia.z));
-                damper = 2f * Recipe.DampingRatio * Mathf.Sqrt(Mathf.Max(k * iref, 1e-6f));
-            }
-
-            // 教程 P2 步5：Target Rotation 保持 0（= 建关节时模型所在的姿势）。
-            joint.targetRotation = Quaternion.identity;
-
-            JointDrive x = joint.angularXDrive;
-            x.positionSpring = k;
-            x.positionDamper = damper;
-            if (Recipe.MaxDriveForce > 0f)
-                x.maximumForce = Recipe.MaxDriveForce;
-            joint.angularXDrive = x;
-
-            JointDrive yz = joint.angularYZDrive;
-            yz.positionSpring = k;
-            yz.positionDamper = damper;
-            if (Recipe.MaxDriveForce > 0f)
-                yz.maximumForce = Recipe.MaxDriveForce;
-            joint.angularYZDrive = yz;
-        }
 
         // ------------------------------------------------------------------
         // 运行期
@@ -1110,7 +1013,14 @@ public void SyncRootToPelvis()
                 if (part.Joint == null)
                     continue;
                 Quaternion keep = part.Joint.targetRotation;
-                ConfigureDrives(part, part.Joint, i);
+                _jointConfigurator.Configure(
+                    part,
+                    part.Joint,
+                    Recipe,
+                    HipsSpring,
+                    LimbSpring,
+                    UpperSpring,
+                    TorsoSpring);
                 part.Joint.targetRotation = keep;
             }
         }

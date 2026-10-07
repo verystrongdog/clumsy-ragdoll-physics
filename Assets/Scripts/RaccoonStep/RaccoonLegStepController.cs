@@ -297,23 +297,11 @@ namespace RaccoonStep
         void ApplyPose(Vector3 ankleTarget)
         {
             _hipPivot = transform.TransformPoint(_hipLocal);
-            Vector3 toTarget = ankleTarget - _hipPivot;
-            float distance = Mathf.Clamp(toTarget.magnitude,
-                Mathf.Abs(_upperLength - _lowerLength) + 0.01f,
-                Mathf.Max(0.02f, _upperLength + _lowerLength - 0.01f));
-            Vector3 direction = toTarget.sqrMagnitude > 0.0001f ? toTarget.normalized : Vector3.down;
-
             Vector3 pole = transform.forward + Vector3.up * KneeForwardBias;
-            Vector3 bendDirection = Vector3.ProjectOnPlane(pole, direction).normalized;
-            if (bendDirection.sqrMagnitude < 0.0001f)
-                bendDirection = Vector3.up;
-
-            float cosKnee = (_upperLength * _upperLength + distance * distance - _lowerLength * _lowerLength)
-                / (2f * _upperLength * distance);
-            cosKnee = Mathf.Clamp(cosKnee, -1f, 1f);
-            float sinKnee = Mathf.Sqrt(Mathf.Max(0f, 1f - cosKnee * cosKnee));
-            Vector3 knee = _hipPivot + direction * (cosKnee * _upperLength)
-                + bendDirection * (sinKnee * _upperLength);
+            RaccoonLegPose pose;
+            RaccoonLegPoseSolver.TrySolve(_hipPivot, ankleTarget, _upperLength, _lowerLength,
+                pole, 0.01f, Mathf.Max(0.02f, _upperLength + _lowerLength - 0.01f), out pose);
+            Vector3 knee = pose.Knee;
 
             SetSegment(_upperProxy, _hipPivot, knee, _upperTwist);
             SetSegment(_lowerProxy, knee, ankleTarget, _lowerTwist);
@@ -338,22 +326,12 @@ namespace RaccoonStep
         void ApplySupportPose()
         {
             Vector3 supportHip = transform.TransformPoint(_supportHipLocal);
-            Vector3 toTarget = _supportFootWorld - supportHip;
-            float distance = Mathf.Clamp(toTarget.magnitude,
-                Mathf.Abs(_supportUpperLength - _supportLowerLength) + 0.01f,
-                Mathf.Max(0.02f, _supportUpperLength + _supportLowerLength - 0.01f));
-            Vector3 direction = toTarget.sqrMagnitude > 0.0001f ? toTarget.normalized : Vector3.down;
             Vector3 pole = transform.forward + Vector3.up * KneeForwardBias;
-            Vector3 bendDirection = Vector3.ProjectOnPlane(pole, direction).normalized;
-            if (bendDirection.sqrMagnitude < 0.0001f)
-                bendDirection = Vector3.up;
-
-            float cosKnee = (_supportUpperLength * _supportUpperLength + distance * distance
-                - _supportLowerLength * _supportLowerLength) / (2f * _supportUpperLength * distance);
-            cosKnee = Mathf.Clamp(cosKnee, -1f, 1f);
-            float sinKnee = Mathf.Sqrt(Mathf.Max(0f, 1f - cosKnee * cosKnee));
-            Vector3 knee = supportHip + direction * (cosKnee * _supportUpperLength)
-                + bendDirection * (sinKnee * _supportUpperLength);
+            RaccoonLegPose pose;
+            RaccoonLegPoseSolver.TrySolve(supportHip, _supportFootWorld,
+                _supportUpperLength, _supportLowerLength, pole, 0.01f,
+                Mathf.Max(0.02f, _supportUpperLength + _supportLowerLength - 0.01f), out pose);
+            Vector3 knee = pose.Knee;
 
             SetSegment(_supportUpperProxy, supportHip, knee, _supportUpperTwist);
             SetSegment(_supportLowerProxy, knee, _supportFootWorld, _supportLowerTwist);

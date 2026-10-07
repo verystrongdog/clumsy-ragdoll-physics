@@ -160,39 +160,34 @@ namespace ClumsyRagdoll
             AddChain("r", +1);
         }
 
-        void AddChain(string suffix, int sideSign)
+void AddChain(string suffix, int sideSign)
         {
+            bool right = suffix == "r";
+            string shoulderKey = right ? RagdollPartId.ShoulderRight : RagdollPartId.ShoulderLeft;
+            string upperKey = right ? RagdollPartId.ArmRight : RagdollPartId.ArmLeft;
+            string foreKey = right ? RagdollPartId.ForearmRight : RagdollPartId.ForearmLeft;
+            string handKey = right ? RagdollPartId.HandRight : RagdollPartId.HandLeft;
+
             ArmIKChain c = new ArmIKChain();
             c.Suffix = suffix;
             c.SideSign = sideSign;
-            c.Shoulder = Ragdoll.Find("shoulder" + suffix);
-            c.Upper = Ragdoll.Find("arm" + suffix);
-            c.Fore = Ragdoll.Find("forearm" + suffix);
-            c.Hand = Ragdoll.Find("hand" + suffix);
+            c.Shoulder = Ragdoll.Find(shoulderKey);
+            c.Upper = Ragdoll.Find(upperKey);
+            c.Fore = Ragdoll.Find(foreKey);
+            c.Hand = Ragdoll.Find(handKey);
             c.JointKeys = new[]
             {
-                "shoulder" + suffix, "arm" + suffix, "forearm" + suffix, "hand" + suffix
+                shoulderKey, upperKey, foreKey, handKey
             };
             c.PalmAxisLocal = ResolvePalmAxis(c.Hand, Recipe);
             c.PalmAxisLocal = PalmAxisVector(Recipe != null ? Recipe.HandPalmAxis : -1);
 
             if (c.Ready && c.Upper != null)
             {
-                // Auto Setup from bind pose（= EP13 的 "Auto Setup from Tip Transform" 的等价物：
-                // 不猜骨长、不猜轴向，全从绑定时测出来的位置反推）。
-                //
-                // ⚠️ **哪两根算「两骨」是实测定的，不是按 Mixamo 的骨头名字定的。**
-                // 本模型 bind pose 的实测位置（世界 x）：
-                //   neck 0 → shoulder −0.2201 → arm −0.4888 → forearm −0.5905 → hand −0.6919
-                // 也就是 Shoulder 骨长 27cm、Arm 骨只有 10cm —— **名字和长度是反的**。
-                // 按 (shoulder+arm | forearm) 分组：L1=0.372 / L2=0.105，肘点落在**腕部**，
-                // 直臂内半径 |L1−L2| = 0.268m（占可达 56%，手几乎收不回身前）。
-                // 按 (shoulder | arm+forearm) 分组：L1=0.271 / L2=0.207 —— 57:43，
-                // 一副正常的臂比例，内半径只剩 0.065m。取后者。
+                // 从绑定姿态测量两段臂长、方向和旋转，供 IK 解算使用。
                 Vector3 upper = c.Upper.RestPosition - c.Shoulder.RestPosition;
                 Vector3 lower = c.Hand.RestPosition - c.Upper.RestPosition;
 
-                // hand → 手指（hand 骨的第一个子物体）；拿不到就退化成「下骨方向」。
                 Vector3 handDir = lower;
                 if (c.Hand.Bone != null && c.Hand.Bone.childCount > 0)
                 {
@@ -203,9 +198,15 @@ namespace ClumsyRagdoll
 
                 c.UpperLength = upper.magnitude;
                 c.LowerLength = lower.magnitude;
-                c.BindUpperDir = upper.sqrMagnitude > 1e-8f ? upper.normalized : Vector3.right * sideSign;
-                c.BindLowerDir = lower.sqrMagnitude > 1e-8f ? lower.normalized : c.BindUpperDir;
-                c.BindHandDir = handDir.sqrMagnitude > 1e-8f ? handDir.normalized : c.BindLowerDir;
+                c.BindUpperDir = upper.sqrMagnitude > 1e-8f
+                    ? upper.normalized
+                    : Vector3.right * sideSign;
+                c.BindLowerDir = lower.sqrMagnitude > 1e-8f
+                    ? lower.normalized
+                    : c.BindUpperDir;
+                c.BindHandDir = handDir.sqrMagnitude > 1e-8f
+                    ? handDir.normalized
+                    : c.BindLowerDir;
                 c.BindShoulderRot = c.Shoulder.RestRotation;
                 c.BindUpperRot = c.Upper.RestRotation;
                 c.BindForeRot = c.Fore.RestRotation;

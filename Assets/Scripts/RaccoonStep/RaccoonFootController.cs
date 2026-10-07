@@ -243,9 +243,9 @@ namespace RaccoonStep
             }
 
             Vector3 targetWorld = transform.TransformPoint(targetLocal);
-            Vector3 positionError = targetWorld - body.position;
-            Vector3 acceleration = positionError * PositionSpring - body.linearVelocity * VelocityDamper;
-            acceleration = Vector3.ClampMagnitude(acceleration, MaxAcceleration);
+            Vector3 acceleration = RaccoonFootMotor.CalculateAcceleration(
+                targetWorld, body.position, body.linearVelocity,
+                PositionSpring, VelocityDamper, MaxAcceleration);
             body.AddForce(acceleration, ForceMode.Acceleration);
         }
 

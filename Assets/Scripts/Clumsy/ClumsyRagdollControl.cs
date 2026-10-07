@@ -15,23 +15,6 @@ namespace ClumsyRagdoll
     /// 这里多接一个 OnCollisionStay —— 教程只写了 Enter，靠控制器在起跳时清标志；
     /// 有 Stay 以后「离地」也能自动纠正，行为与教程一致但不会卡在 true。
     /// </summary>
-    public sealed class LimbCollision : MonoBehaviour
-    {
-        public ClumsyRagdoll Ragdoll;
-
-        void OnCollisionEnter(Collision collision)
-        {
-            if (Ragdoll != null)
-                Ragdoll.IsGrounded = true;
-        }
-
-        void OnCollisionStay(Collision collision)
-        {
-            if (Ragdoll != null)
-                Ragdoll.IsGrounded = true;
-        }
-    }
-
     /// <summary>
     /// 教程 P3：给 hips 这个 Rigidbody 加力。
     /// 原文把脚本挂在 hips 上、用 <c>hips.transform.forward</c> 当前方；
@@ -116,8 +99,6 @@ namespace ClumsyRagdoll
         }
 
         float _turnPhase;
-        float _lastRootYaw;
-        bool _hasRootYaw;
 
         /// <summary>摆动进度 0..1：0 = 刚离地（脚在后），1 = 刚要落地（脚在前）。</summary>
         public float SwingProgress { get; private set; }
@@ -139,8 +120,9 @@ namespace ClumsyRagdoll
         float _vFwdSmooth;
 
         /// <summary>跳跃键上一帧是否按着 —— 用来把「按住」变成「只触发一次」。</summary>
-        bool _jumpHeldLatch;
         public float SpeedMeasured { get; private set; }
+
+        readonly ClumsyMovementState _movementState = new ClumsyMovementState();
 
         // ==================================================================
         // ★ 2026-10-02 · 双手搬运的**重量反馈**（见 Recipe 的「手部 · 双手搬运」段）
@@ -177,15 +159,11 @@ void FixedUpdate()
 
             if (Source != null)
             {
-                Move = Source.Move;
-                Sprint = Source.Sprint;
-                // ⚠️ 起跳只在「按下的那一帧」。
-                // 之前这里直接传的是「按住」状态，而 IsGrounded 会被 LimbCollision.OnCollisionStay
-                // 每帧刷回 true —— 于是按住空格 = 脚还没离地就每步补一个 3 m/s 冲量，
-                // 叠成好几发，跳得比单发高好几倍。**这就是「跳太高」的真正原因**，不是 JumpSpeed 太大。
-                bool jumpHeld = Source.JumpHeld;
-                JumpPressed = jumpHeld && !_jumpHeldLatch;
-                _jumpHeldLatch = jumpHeld;
+                ClumsyMovementState.InputFrame input =
+                    _movementState.ReadInput(Source);
+                Move = input.Move;
+                Sprint = input.Sprint;
+                JumpPressed = input.JumpPressed;
             }
 
             // ★ 2026-10-02 双手搬运的**重量反馈**（owner：「真的被压下去」）：
@@ -248,13 +226,7 @@ void FixedUpdate()
             //   ② A/D 给出的转身指令（`TurnWithAD` 关掉就回到老的横移）；
             //   ③ 交给相机的速率指令 —— **yaw 的权威在相机那边**，控制器只出指令。
             float rootYaw = Ragdoll.Root != null ? Ragdoll.Root.eulerAngles.y : 0f;
-            if (_hasRootYaw)
-            {
-                float raw = Mathf.DeltaAngle(_lastRootYaw, rootYaw) / Mathf.Max(Time.fixedDeltaTime, 1e-4f);
-                TurnRateNow = Mathf.Lerp(TurnRateNow, raw, 0.4f);
-            }
-            _lastRootYaw = rootYaw;
-            _hasRootYaw = true;
+            TurnRateNow = _movementState.UpdateTurnRate(rootYaw, Time.fixedDeltaTime);
             TurnDrive = Recipe.TurnWithAD ? Mathf.Clamp(Move.x, -1f, 1f) : 0f;
             TurnRateCommand = TurnDrive * Recipe.TurnKeySpeed;
             // ★ 2026-10-02：**转身不绕相机** —— 控制器自己把 `Root` 的 yaw 推上去。
@@ -773,40 +745,7 @@ void FixedUpdate()
 
     }
 
-    public interface IClumsyInput
-    {
-        Vector2 Move { get; }
-        bool Sprint { get; }
-        /// <summary>跳跃键是否「正被按住」。「按下」的边沿由 ClumsyController 判（见那边的注释）。</summary>
-        bool JumpHeld { get; }
-    }
 
-    /// <summary>本地键盘输入：WASD + Shift + 空格（教程 P3 的键位）。</summary>
-    public sealed class KeyboardInput : IClumsyInput
-    {
-        public Vector2 Move
-        {
-            get
-            {
-                float x = 0f;
-                float y = 0f;
-                if (Input.GetKey(KeyCode.A)) x -= 1f;
-                if (Input.GetKey(KeyCode.D)) x += 1f;
-                if (Input.GetKey(KeyCode.S)) y -= 1f;
-                if (Input.GetKey(KeyCode.W)) y += 1f;
-                Vector2 v = new Vector2(x, y);
-                return v.sqrMagnitude > 1f ? v.normalized : v;
-            }
-        }
-
-        // 教程用 GetKey(LeftShift) 判冲刺
-        public bool Sprint { get { return Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift); } }
-
-        // 教程用 Input.GetAxis("Jump") > 0（默认绑空格）。
-        // 轴是「按住就 > 0」，所以这里只能返回「按住」状态；
-        // 「按下」的边沿必须在控制器里锁存 —— 直接拿按住状态去起跳会叠成火箭。
-        public bool JumpHeld { get { return Input.GetKey(KeyCode.Space) || Input.GetAxisRaw("Jump") > 0.5f; } }
-    }
 
     /// <summary>
     /// 教程 P4 / P5 的替代实现。
@@ -873,24 +812,23 @@ void FixedUpdate()
         public float TurnDrive;
 
         /// <summary>出生姿势之外的固定偏移（把手臂从 T-pose 放下来等）。</summary>
-        readonly Dictionary<string, Quaternion> _base = new Dictionary<string, Quaternion>();
-        float _lastYaw;
+        readonly RagdollPoseWriter _poseWriter = new RagdollPoseWriter();
+        readonly GaitStateMachine _gaitState = new GaitStateMachine();
 
         /// <summary>★ 2026-10-01：踝的摆平修正量（度），每帧按鞋底实际倾角反馈累加。</summary>
         readonly float[] _ankleCmd = new float[2];
+        readonly GaitPoseCalculator _gaitCalculator = new GaitPoseCalculator();
 
         /// <summary>★ 2026-10-01：本帧摆动腿的外摆量（度）。</summary>
-        float _gaitAbduct;
+
 
         /// <summary>★ 2026-10-01：空中姿势的混合权重（1 = 完全是跳跃姿势）。</summary>
-        float _airBlend;
+
 
         /// <summary>★ 2026-10-01：本帧的基础外摆量（度）。</summary>
-        float _gaitStanceAbduct;
+
 
         /// <summary>★ 2026-10-01：本帧摆动的是不是右腿（决定外摆往哪边加）。</summary>
-        bool _abductIsRightSwing;
-        bool _hasYaw;
 
         /// <summary>
         /// 算出手臂「放下来」的固定偏移。
@@ -903,25 +841,7 @@ void FixedUpdate()
         /// </summary>
 public void BuildArmRestPose()
         {
-            _base.Clear();
-            if (Ragdoll == null || Recipe == null)
-                return;
-
-            float down = Recipe.ArmDownDegrees;
-            float share = Mathf.Clamp01(Recipe.ShoulderDownShare);
-            float shoulder = down * share;
-            float upper = down * (1f - share);
-
-            // 「可见地绕角色前方轴 +θ」会把朝左的手臂转向下方（已用隔离实验验过符号）。
-            _base["shoulderl"] = JointTarget(+shoulder, ForwardAxis(Ragdoll.Find("shoulderl")));
-            _base["arml"] = JointTarget(+upper, ForwardAxis(Ragdoll.Find("arml")));
-            _base["shoulderr"] = JointTarget(-shoulder, ForwardAxis(Ragdoll.Find("shoulderr")));
-            _base["armr"] = JointTarget(-upper, ForwardAxis(Ragdoll.Find("armr")));
-
-            // 肘：小臂从「向下」转向「向前」= 可见地绕右轴 −θ。
-            // （LockPassengerAngular 开着的时候小臂角运动是 Locked 的，这一条不生效。）
-            _base["forearml"] = JointTarget(-Recipe.ForeArmBendDegrees, RightAxis(Ragdoll.Find("forearml")));
-            _base["forearmr"] = JointTarget(-Recipe.ForeArmBendDegrees, RightAxis(Ragdoll.Find("forearmr")));
+            _poseWriter.BuildArmRestPose(Ragdoll, Recipe);
         }
 
         /// <summary>
@@ -952,8 +872,7 @@ public void BuildArmRestPose()
             return part == null ? Vector3.right : part.LocalRight;
         }
 
-        readonly Dictionary<string, Quaternion> _targets = new Dictionary<string, Quaternion>();
-        float _blend;   // 0 = 出生姿势，1 = 满幅度步态；避免「突然开始走」
+        // Pose modifiers and joint writes are owned by RagdollPoseWriter.
 
 void Start()
         {
@@ -972,7 +891,7 @@ void FixedUpdate()
                 return;
             if (Ragdoll.Hips == null)
                 return;
-            if (_base.Count == 0)
+            if (!_poseWriter.HasBasePose)
                 BuildArmRestPose();
 
             float dt = Time.fixedDeltaTime;
@@ -990,220 +909,149 @@ void FixedUpdate()
             if (Wobble != null)
                 Wobble.Step(dt);
 
-            // ---- 转身速率（Root 的 yaw 由相机脚本写）----
-            float yaw = Ragdoll.Root != null ? Ragdoll.Root.eulerAngles.y : 0f;
-            if (_hasYaw)
-            {
-                float raw = Mathf.DeltaAngle(_lastYaw, yaw) / Mathf.Max(dt, 1e-4f);
-                TurnRate = Mathf.Lerp(TurnRate, raw, 0.35f);
-            }
-            _lastYaw = yaw;
-            _hasYaw = true;
-            float turn = Mathf.Clamp(TurnRate / Mathf.Max(Recipe.TurnReferenceRate, 1f), -1f, 1f);
-            TurnDrive = turn;
+            Vector2 move = Controller != null ? Controller.Move : Vector2.zero;
+            bool sprint = Controller != null && Controller.Sprint;
+            float rootYaw = Ragdoll.Root != null
+                ? Ragdoll.Root.eulerAngles.y
+                : 0f;
 
-            // ---- 移动输入 ----
-            float moveForward = 0f;
-            float moveSide = 0f;
-            bool sprint = false;
-            if (Controller != null)
-            {
-                moveForward = Controller.Move.y;
-                moveSide = Controller.Move.x;
-                sprint = Controller.Sprint;
-            }
-            float rawDrive = Mathf.Clamp01(Mathf.Abs(moveForward) + Mathf.Abs(moveSide) * 0.5f);
-            float want = rawDrive > 0.05f ? rawDrive : 0f;
-            _blend = Mathf.MoveTowards(_blend, want, dt * 3.5f);
-            Drive = _blend;
+            GaitStateMachine.Frame gaitState = _gaitState.Step(
+                Recipe,
+                move,
+                sprint,
+                rootYaw,
+                dt);
 
-            bool backward = moveForward < -0.05f;
-            float stride = backward ? Recipe.BackwardStrideScale : 1f;
-            float gaitSign = backward ? -1f : 1f;
-            // ★ 2026-10-02：**原地转身不迈步、只抬脚** —— 前后摆幅按 `GaitStrideScale` 压小
-            float gStride = Controller != null && Controller.GaitActive ? Controller.GaitStrideScale : 1f;
+            // 保留公开诊断字段，让现有 HUD/调试代码无需跟随内部重构。
+            Phase = gaitState.Phase;
+            TurnPhase = gaitState.TurnPhase;
+            Drive = gaitState.Drive;
+            TurnRate = gaitState.TurnRate;
+            TurnDrive = gaitState.TurnDrive;
 
-            // 相位始终按实时前进。**不要把时间倒放**（dir = −1）——
-            // 那是「正走路的录像倒着放」，看起来就像有人从后面拖着角色。
-            float freq = Recipe.StrideFrequency * (sprint ? Recipe.SprintScale : 1f);
-            Phase += dt * freq;
-            if (Phase > 1f)
-                Phase -= Mathf.Floor(Phase);
+            GaitPoseFrame gaitPose = _gaitCalculator.Calculate(
+                Recipe,
+                Controller,
+                gaitState.Phase,
+                gaitState.TurnPhase,
+                gaitState.Drive,
+                gaitState.TurnDrive,
+                gaitState.MoveForward,
+                PitchDegrees,
+                dt,
+                Ragdoll != null && Ragdoll.IsGroundedNow);
 
-            // ---- 原地转身踏步 ----
-            float tAbs = Mathf.Abs(turn);
-            if (Recipe.TurnStepping && tAbs > 0.02f)
-                TurnPhase += dt * Recipe.TurnStepRate * tAbs;
-            if (TurnPhase > 1f)
-                TurnPhase -= Mathf.Floor(TurnPhase);
+            Pose(
+                RagdollPartId.UpperLegLeft,
+                gaitPose.UpperLegLeftRight,
+                0f,
+                gaitPose.UpperLegLeftForward,
+                dt);
+            Pose(
+                RagdollPartId.UpperLegRight,
+                gaitPose.UpperLegRightRight,
+                0f,
+                gaitPose.UpperLegRightForward,
+                dt);
+            Pose(
+                RagdollPartId.LowerLegLeft,
+                gaitPose.LowerLegLeftRight,
+                0f,
+                0f,
+                dt);
+            Pose(
+                RagdollPartId.LowerLegRight,
+                gaitPose.LowerLegRightRight,
+                0f,
+                0f,
+                dt);
 
-            float twoPi = Mathf.PI * 2f;
-            float s = Mathf.Sin(Phase * twoPi);
-            float c = Mathf.Cos(Phase * twoPi);
-            float ts = Mathf.Sin(TurnPhase * twoPi);
-            float amp = _blend;
-            float tAmp = Recipe.TurnStepping ? tAbs : 0f;
-            float turnSign = turn >= 0f ? 1f : -1f;
+            bool gaitLegs = gaitPose.FootGaitActive;
 
-            // ---- 腿：步行摆动 + 转身踏步（后一个腿交替外摆、抬腿）----
-            // ★ 2026-10-01：`Recipe.UseFootGait` 时改用**脚种植步态**的相位算腿角
-            //   （相位在 ClumsyController.StepFootGait 里推进，这里只读）。
-            //   形状：摆动腿的「向前量」 f = −cos(uπ)（0 = 刚离地、脚在后；1 = 要落地、脚在前），
-            //   支撑腿与之反相 f = +cos(uπ)；膝：摆动腿 sin(uπ) 中段最弯，支撑腿只留一点。
-            //   符号是实测的：`Pose("uplegl", −25)` 会让左脚**前移** +0.15 m，右脚镜像。
-            float legL, legR, kneeL, kneeR;
-            bool gaitLegs = Recipe.UseFootGait && Controller != null && Controller.GaitActive;
-            if (gaitLegs)
-            {
-                float u = Controller.SwingProgress;
-                bool rightSwings = Controller.SwingFoot == "footr";
-                // ★ 2026-10-01：摆动腿的「向前量」不是正弦，而是**前伸 → 略微回带**。
-                //   为什么：支撑相里脚相对髖匀速后移 ⇒ 在世界上站着不动 ✓；
-                //   而摆动相如果按正弦，落地那一刻脚相对髖的速度 ≈ 0 ⇒ 世界上还在以身体速度前冲，
-                //   一落地就打滑（实测每步滑 10 cm）。前伸过一点再回带，落地瞬间的相对速度 ≈ −v ⇒ 世界速度 ≈ 0。
-                float uReach = Mathf.Clamp(Recipe.SwingReachAt, 0.3f, 0.95f);
-                float reach = 1f + Recipe.SwingOvershoot;
-                float fSwing;
-                if (u < uReach)
-                    fSwing = Mathf.Lerp(-1f, reach, Mathf.SmoothStep(0f, 1f, u / uReach));
-                else
-                    fSwing = Mathf.Lerp(reach, 1f, Mathf.SmoothStep(0f, 1f, (u - uReach) / Mathf.Max(0.05f, 1f - uReach)));
-                float fSupport = 1f - 2f * u;   // 支撑脚：相对髖匀速后移（世界上踩住不动）
-                float fL = rightSwings ? fSupport : fSwing;
-                float fR = rightSwings ? fSwing : fSupport;
-                // ⚠️ 实测：**两条腿«向前»用的是同一个符号**（Pose(uplegl,−25) 与 Pose(uplegr,−25)
-                //   都是把脚往前送 +0.15 m）。原代码里左右取反号是因为它要的是«两条腿反向摆»。
-                legL = -Recipe.HipSwingDegrees * amp * stride * gStride * gaitSign * fL;
-                legR = -Recipe.HipSwingDegrees * amp * stride * gStride * gaitSign * fR;
-                // 屈膝剖面：峰值挪到 early（离开后立刻把脚提起来），落地前再伸直
-                float kp = Mathf.Clamp(Recipe.SwingKneePeakAt, 0.15f, 0.85f);
-                float kneeShape = u < kp
-                    ? Mathf.Sin((u / kp) * (Mathf.PI * 0.5f))
-                    : Mathf.Cos(((u - kp) / Mathf.Max(0.05f, 1f - kp)) * (Mathf.PI * 0.5f));
-                // ⚠️ **摆动腿的屈膝不乘 `stride`**：`stride` 是«步幅»的比例（后退 = `BackwardStrideScale`），
-                //   而屈膝管的是«离地高度» —— 两者绑在一起就会出现「步幅短 ⇒ 抬不起脚 ⇒ 一路拖地」。
-                //   实测：后退时整段摆动只有 1.0–2.9 cm（前进中段 6.6 cm），刮蹭帧 55%（前进 21%）。
-                float kneeSw = Recipe.KneeBendDegrees * kneeShape * amp;
-                // 摆动腿外摆（摆动相中段最大）：直走时两只脚会打架，斜走不会 —— 靠这一下把摆动脚挪开
-                _gaitAbduct = Recipe.GaitSwingAbductDegrees * Mathf.Sin(u * Mathf.PI) * Recipe.GaitAbductSign;
-                // 基础外摆：两条腿一起往外一点，把两只脚的轨迹拉成两条平行线（按驱动量缩放）
-                _gaitStanceAbduct = Recipe.GaitStanceAbductDegrees * amp * Recipe.GaitAbductSign;
-                _abductIsRightSwing = rightSwings;
-                float kneeSup = Recipe.GaitSupportKneeScale * Recipe.KneeBendDegrees * amp * stride * gStride;
-                kneeL = rightSwings ? kneeSup : kneeSw;
-                kneeR = rightSwings ? kneeSw : kneeSup;
-            }
-            else
-            {
-                legL = -Recipe.HipSwingDegrees * s * amp * stride * gaitSign;
-                legR = +Recipe.HipSwingDegrees * s * amp * stride * gaitSign;
-                kneeL = Recipe.KneeBendDegrees * Mathf.Max(0f, s * gaitSign) * amp * stride;
-                kneeR = Recipe.KneeBendDegrees * Mathf.Max(0f, -s * gaitSign) * amp * stride;
-            }
-            // ★ 2026-10-02：走步态时抬脚由步态负责，转身踏步不再叠加（否则一次抬两次）
-            float turnLiftAmp = gaitLegs ? 0f : tAmp;
-            float liftL2 = -Recipe.TurnLiftDegrees * Mathf.Max(0f, ts) * turnLiftAmp;
-            float liftR2 = -Recipe.TurnLiftDegrees * Mathf.Max(0f, -ts) * turnLiftAmp;
-            float abdL = -Recipe.TurnAbductDegrees * ts * tAmp * turnSign;
-            float abdR = +Recipe.TurnAbductDegrees * ts * tAmp * turnSign;
-            // 摆动腿那一侧再叠上外摆（左 −sign / 右 +sign，与转身踏步同一镜像约定）
-            if (gaitLegs)
-            {
-                if (_abductIsRightSwing) abdR += +_gaitAbduct;
-                else abdL += -_gaitAbduct;
-                abdL += -_gaitStanceAbduct;   // 左腿往外 = −sign
-                abdR += +_gaitStanceAbduct;   // 右腿往外 = +sign
-            }
-            // ★ 2026-10-01 **空中姿势**：人跳起来不该还在原地跑步。
-            //   空中把腿收一点（髋前摆 + 屈膝）、手臂抬起来，落地再用 0.1 s 融回步态。
-            //   实测「看起来像摔倒」的另一半原因就是空中腿还在按步态扫 + 落地踉跄 0.92。
-            {
-                bool air = Ragdoll != null && !Ragdoll.IsGroundedNow;
-                float airWant = air ? 1f : 0f;
-                _airBlend = Mathf.MoveTowards(_airBlend, airWant, dt * (air ? 9f : 11f));
-            }
-            if (_airBlend > 0.001f)
-            {
-                legL = Mathf.Lerp(legL, -Recipe.AirHipDegrees, _airBlend);
-                legR = Mathf.Lerp(legR, -Recipe.AirHipDegrees, _airBlend);
-                kneeL = Mathf.Lerp(kneeL, Recipe.AirKneeDegrees, _airBlend);
-                kneeR = Mathf.Lerp(kneeR, Recipe.AirKneeDegrees, _airBlend);
-            }
-            Pose("uplegl", legL + liftL2, 0f, abdL, dt);
-            Pose("uplegr", legR + liftR2, 0f, abdR, dt);
-            Pose("legl", kneeL + Mathf.Max(0f, ts) * tAmp * 10f, 0f, 0f, dt);
-            Pose("legr", kneeR + Mathf.Max(0f, -ts) * tAmp * 10f, 0f, 0f, dt);
-
-            // ★ 2026-10-01 **踝**：把鞋底摆平（治「用脚尖走路」）。
-            //   ⚠️ 解析式补偿（踝 = −(髋 + 膝)）实测**不准**：隔离实验里髋转 25° 鞋底才斜 5°，
-            //   而且一走起来鞋底斜到 78°（等于踮着脚尖走）。所以改成**反馈**：
-            //   每帧量鞋底实际倾角，累加一个修正量喂给踝的 targetRotation。
             if (!gaitLegs)
             {
-                // 停走：踝放回中立（不然上一帧的修正量会一直挂在脚上，站着都歪着漂）
                 _ankleCmd[0] = 0f;
                 _ankleCmd[1] = 0f;
-                Pose("footl", 0f, 0f, 0f, dt);
-                Pose("footr", 0f, 0f, 0f, dt);
+                Pose(RagdollPartId.FootLeft, 0f, 0f, 0f, dt);
+                Pose(RagdollPartId.FootRight, 0f, 0f, 0f, dt);
             }
-            else if (gaitLegs && Recipe.FootLevelAnkle)
+            else if (Recipe.FootLevelAnkle)
             {
-                Vector3 charRight = Ragdoll.Root != null ? Ragdoll.Root.right : Vector3.right;
+                Vector3 charRight =
+                    Ragdoll.Root != null ? Ragdoll.Root.right : Vector3.right;
+
                 for (int ai = 0; ai < 2; ai++)
                 {
-                    string fk = ai == 0 ? "footl" : "footr";
-                    ClumsyPart fp = Ragdoll.Find(fk);
-                    if (fp == null || fp.Shape == null)
+                    string footKey = RagdollPartId.Foot(ai == 1);
+                    ClumsyPart footPart = Ragdoll.Find(footKey);
+                    if (footPart == null || footPart.Shape == null)
                         continue;
-                    // 鞋底朝上那根轴与世界上方的**有符号**夹角（绕角色右轴）
-                    float tilt = Vector3.SignedAngle(fp.Shape.transform.up, Vector3.up, charRight);
-                    _ankleCmd[ai] = Mathf.Clamp(_ankleCmd[ai] + Recipe.AnkleLevelGain * tilt, -70f, 70f);
-                    bool swinging = Controller.SwingFoot == fk;
-                    Pose(fk, _ankleCmd[ai] * (swinging ? Recipe.SwingAnkleScale : 1f), 0f, 0f, dt);
+
+                    float tilt = Vector3.SignedAngle(
+                        footPart.Shape.transform.up,
+                        Vector3.up,
+                        charRight);
+
+                    _ankleCmd[ai] = Mathf.Clamp(
+                        _ankleCmd[ai] + Recipe.AnkleLevelGain * tilt,
+                        -70f,
+                        70f);
+
+                    bool swinging = Controller.SwingFoot == footKey;
+                    Pose(
+                        footKey,
+                        _ankleCmd[ai] * (swinging ? Recipe.SwingAnkleScale : 1f),
+                        0f,
+                        0f,
+                        dt);
                 }
             }
 
-            // ---- 臂：与同侧腿反相 ----
-            float armAmp = Recipe.ArmSwingDegrees * amp * stride;
-            Pose("shoulderl", 0f, 0f, -6f * tAmp * turnSign, dt);
-            Pose("shoulderr", 0f, 0f, -6f * tAmp * turnSign, dt);
-            if (gaitLegs)
-            {
-                // ★ 2026-10-01：手臂跟**同一个步态相位**摆（原来用的是本类自己那套 sin，
-                //   与新步态的左右脚不同步 —— 看着像肩膀在乱晃）。左臂与左腿反相。
-                float gl = Mathf.Cos(Controller.SwingProgress * Mathf.PI);
-                bool rSw = Controller.SwingFoot == "footr";
-                // ★ 2026-10-02 后退：手臂跟着腿一起镜像（`gaitSign`），不然后退时手臂是顺拐的
-                float ffL = (rSw ? +gl : -gl) * gaitSign;
-                float ffR = (rSw ? -gl : +gl) * gaitSign;
-                if (_airBlend > 0.001f)
-                {
-                    Pose("arml", Mathf.Lerp(+armAmp * ffL, -Recipe.AirArmDegrees, _airBlend), 0f, 0f, dt);
-                    Pose("armr", Mathf.Lerp(-armAmp * ffR, -Recipe.AirArmDegrees, _airBlend), 0f, 0f, dt);
-                }
-                else
-                {
-                    Pose("arml", +armAmp * ffL, 0f, 0f, dt);
-                    Pose("armr", -armAmp * ffR, 0f, 0f, dt);
-                }
-                Pose("forearml", -armAmp * 0.4f * Mathf.Max(0f, -ffL), 0f, 0f, dt);
-                Pose("forearmr", +armAmp * 0.4f * Mathf.Max(0f, -ffR), 0f, 0f, dt);
-            }
-            else
-            {
-                Pose("arml", +armAmp * s * gaitSign, 0f, 0f, dt);
-                Pose("armr", -armAmp * s * gaitSign, 0f, 0f, dt);
-                Pose("forearml", -armAmp * 0.4f * Mathf.Max(0f, s * gaitSign), 0f, 0f, dt);
-                Pose("forearmr", +armAmp * 0.4f * Mathf.Max(0f, -s * gaitSign), 0f, 0f, dt);
-            }
+            Pose(
+                RagdollPartId.ShoulderLeft,
+                0f,
+                0f,
+                gaitPose.ShoulderLeftForward,
+                dt);
+            Pose(
+                RagdollPartId.ShoulderRight,
+                0f,
+                0f,
+                gaitPose.ShoulderRightForward,
+                dt);
+            Pose(RagdollPartId.ArmLeft, gaitPose.ArmLeftRight, 0f, 0f, dt);
+            Pose(RagdollPartId.ArmRight, gaitPose.ArmRightRight, 0f, 0f, dt);
+            Pose(
+                RagdollPartId.ForearmLeft,
+                gaitPose.ForearmLeftRight,
+                0f,
+                0f,
+                dt);
+            Pose(
+                RagdollPartId.ForearmRight,
+                gaitPose.ForearmRightRight,
+                0f,
+                0f,
+                dt);
 
-            // ---- 躯干：前进前倾 / 后退后仰 / 转身向内侧倾 ----
-            float lean = (backward ? Recipe.BackwardLeanDegrees : Recipe.SpineLeanDegrees) * amp + PitchDegrees;
-            float sway = (1f - amp) * 1.5f * c;
-            float roll = -5f * tAmp * turnSign;
-            Pose("spine", lean, sway, roll, dt);
-            Pose("neck", -lean * 0.4f, 0f, roll * 0.3f, dt);
-            Pose("head", -lean * 0.3f + (1f - amp) * 1.2f * s, 0f, roll * 0.5f, dt);
+            Pose(
+                RagdollPartId.Spine,
+                gaitPose.SpineRight,
+                gaitPose.SpineUp,
+                gaitPose.SpineForward,
+                dt);
+            Pose(
+                RagdollPartId.Neck,
+                gaitPose.NeckRight,
+                0f,
+                gaitPose.NeckForward,
+                dt);
+            Pose(
+                RagdollPartId.Head,
+                gaitPose.HeadRight,
+                0f,
+                gaitPose.HeadForward,
+                dt);
 
             // ---- 手骨：步态从来不写它，所以单独走一遍 ----
             // （教程 P4 步8「只驱动旋转点」把手划在旋转点之外，上面没有 Pose("hand…") 的调用。）
@@ -1222,60 +1070,34 @@ void FixedUpdate()
         /// <summary>把一个「绕局部右方 / 上方 / 前后」的欧拉目标写到该部件的 targetRotation。</summary>
 void Pose(string key, float aboutRight, float aboutUp, float aboutForward, float dt)
         {
-            ClumsyPart part = Ragdoll.Find(key);
-            if (part == null || part.Joint == null)
-                return;
-            // 教程 P5 步2：非旋转点的角运动是 Locked 的，写 targetRotation 也不会动 —— 跳过。
-            if (part.Joint.angularXMotion == ConfigurableJointMotion.Locked)
-                return;
-
-            // ---- 姿势从哪来 ----
-            // ① 动画姿势源（教程那套双身体架构）：直接把动画骨髀的**局部**旋转反算成 targetRotation。
-            // ② 程序化步态（上一轮那套）：下面那段欧拉目标。
-            // 两者产出的是**同一个东西**（targetRotation），所以后面的 IK 混合、笨拙层、落盘全都一样走。
-            Quaternion wanted;
-            if (UseAnimationPose && Animation.TryGetTargetRotation(part, out wanted))
-            {
-                ApplyJointTarget(part, key, wanted, dt);
-                return;
-            }
-
-            // aboutXxx = 「让这个部件可见地绕角色的右/上/前轴转多少度」（正负按 Unity 习惯）。
-            // 写进 Joint 之前一律过 JointTarget 取负（见 JointTarget 的注释）。
-            wanted = Quaternion.identity;
-            if (Mathf.Abs(aboutRight) > 1e-4f)
-                wanted = JointTarget(aboutRight, part.LocalRight) * wanted;
-            if (Mathf.Abs(aboutUp) > 1e-4f)
-                wanted = JointTarget(aboutUp, part.LocalUp) * wanted;
-            if (Mathf.Abs(aboutForward) > 1e-4f)
-                wanted = JointTarget(aboutForward, ForwardAxis(part)) * wanted;
-
-            Quaternion basis;
-            if (_base.TryGetValue(key, out basis))
-                wanted = basis * wanted;
-
-            ApplyJointTarget(part, key, wanted, dt);
+            _poseWriter.Write(
+                Ragdoll,
+                Recipe,
+                Controller,
+                Animation,
+                ArmIK,
+                Wobble,
+                key,
+                aboutRight,
+                aboutUp,
+                aboutForward,
+                dt);
         }
 
         /// <summary>
         /// 步态**从不写**的关节（手骨 —— 教程 P4 步8「只驱动旋转点」把手骨划在旋转点之外）。
         /// 基准就是出生姿势，然后叠 IK 覆盖。
         /// </summary>
-        void PoseIKOnly(string key, float dt)
+void PoseIKOnly(string key, float dt)
         {
-            ClumsyPart part = Ragdoll.Find(key);
-            if (part == null || part.Joint == null)
-                return;
-            // 教程 P5 步2：非旋转点的角运动是 Locked 的，写 targetRotation 也不会动 —— 跳过。
-            // （FreeElbowAngular 把「小臂 + 手」放开了，所以手骨现在会真的动。）
-            if (part.Joint.angularXMotion == ConfigurableJointMotion.Locked)
-                return;
-
-            Quaternion basis;
-            if (!_base.TryGetValue(key, out basis))
-                basis = Quaternion.identity;
-
-            ApplyJointTarget(part, key, basis, dt);
+            _poseWriter.WriteIKOnly(
+                Ragdoll,
+                Recipe,
+                Controller,
+                ArmIK,
+                Wobble,
+                key,
+                dt);
         }
 
         /// <summary>
@@ -1286,37 +1108,7 @@ void Pose(string key, float aboutRight, float aboutUp, float aboutForward, float
         /// targetRotation 与「相对父体的局部旋转」一一对应（差一个固定的逆，
         /// 推导见 <see cref="ClumsyArmIK.WorldToJoint"/>），所以两者的 Slerp 结果仍是合法的 targetRotation。
         /// </summary>
-        void ApplyJointTarget(ClumsyPart part, string key, Quaternion wanted, float dt)
-        {
-            // ★ 笨拙层在 IK **之前**：先让「目标自己」变笨拙，再让 IK 把「够东西」这件事拉回来。
-            //    顺序反过来的话，抓东西的手会被晃走 —— 手是精确定位需求最强的那一根。
-            //    而且被 IK 接管的关节根本不晃（不然抓东西时手会在物体上抹来抹去）。
-            float ikWeight = 0f;
-            Quaternion ikTarget = Quaternion.identity;
-            bool hasIK = ArmIK != null && ArmIK.TryGetOverride(key, out ikTarget, out ikWeight);
 
-            if (Wobble != null && !hasIK)
-                wanted = Wobble.Apply(key, part, wanted, dt);
-
-            if (hasIK)
-                wanted = Quaternion.Slerp(wanted, ikTarget, ikWeight);
-
-            Quaternion previous;
-            if (!_targets.TryGetValue(key, out previous))
-                previous = wanted;
-
-            // IK 生效时放宽角速度上限 —— 否则 420°/s 在 0.37m 的肩半径上只有 ~2.7 m/s 的手速，
-            // 手会明显跟不上目标（够不到东西）。
-            float slew = Mathf.Lerp(Recipe.PoseSlewDegreesPerSecond, Recipe.ArmIKSlewDegreesPerSecond,
-                Mathf.Clamp01(ikWeight));
-            // ★ 脚种植步态：腿要真的扫过去，420°/s 会把幅度砍掉一半（实测 ±13° vs 目标 ±26°）
-            if (Recipe.UseFootGait && Controller != null && Controller.PlantFoot != null
-                && (key.StartsWith("upleg") || key.StartsWith("leg") || key.StartsWith("foot")))
-                slew = Mathf.Max(slew, Recipe.GaitPoseSlewDegreesPerSecond);
-            Quaternion next = Quaternion.RotateTowards(previous, wanted, slew * dt);
-            _targets[key] = next;
-            part.Joint.targetRotation = next;
-        }
         static JointDrive MakeDrive(JointDrive drive, float spring)
         {
             drive.positionSpring = spring;
@@ -1324,16 +1116,15 @@ void Pose(string key, float aboutRight, float aboutUp, float aboutForward, float
         }
 
         /// <summary>关掉姿势驱动：所有旋转点回到出生姿势（教程 P1+P2 的纯弹簧状态）。</summary>
-        public void ResetToBindPose()
+public void ResetToBindPose()
         {
-            _targets.Clear();
-            _blend = 0f;
-            for (int i = 0; i < Ragdoll.Parts.Count; i++)
-            {
-                ClumsyPart p = Ragdoll.Parts[i];
-                if (p.Joint != null)
-                    p.Joint.targetRotation = Quaternion.identity;
-            }
+            _gaitState.Reset();
+            Phase = 0f;
+            TurnPhase = 0f;
+            Drive = 0f;
+            TurnRate = 0f;
+            TurnDrive = 0f;
+            _poseWriter.ResetToBindPose(Ragdoll);
         }
     }
 }

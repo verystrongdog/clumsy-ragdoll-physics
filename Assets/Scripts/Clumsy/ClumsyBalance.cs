@@ -113,7 +113,7 @@ namespace ClumsyRagdoll
         /// 令 dτ/dθ &gt; margin × M·g·h_com 就得到上式。**margin 与弹簧那一路是同一个口径**，
         /// 所以 `HipsSpringMargin = 8` 与 `UprightTorqueMargin = 8` 是可比的（一个是 N·m/rad、一个是 N·m 上限）。
         ///
-        /// 阻尼项：与 `ClumsyRagdoll.ConfigureDrives` 的关节阻尼同一个式子（2ζ√(k·I)），
+        /// 阻尼项：与 `RagdollJointConfigurator` 的关节阻尼同一个式子（2ζ√(k·I)），
         /// 只是 k 换成「力矩函数在原点的斜率」k_eff = τ_max/π，I 换成**整具身体**的惯量
         /// —— 因为力矩是分发到整具身体的（见 ApplyBodyTorque），阻尼也必须按同一个口径走。
         /// </summary>

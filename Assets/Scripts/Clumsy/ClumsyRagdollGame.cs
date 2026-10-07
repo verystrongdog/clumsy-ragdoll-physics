@@ -76,7 +76,10 @@ namespace ClumsyRagdoll
         {
             if (UseStandaloneStepByStep)
             {
-                StepByStep.StepByStepPrototype prototype = gameObject.AddComponent<StepByStep.StepByStepPrototype>();
+                StepByStep.StepByStepPrototype prototype =
+                    GetComponent<StepByStep.StepByStepPrototype>();
+                if (prototype == null)
+                    prototype = gameObject.AddComponent<StepByStep.StepByStepPrototype>();
                 return;
             }
             ApplyEnvironment();
@@ -551,7 +554,7 @@ public void Build()
                 Recipe.Balance = Recipe.Balance == BalanceMode.StabilizerJoint
                     ? BalanceMode.UprightTorque : BalanceMode.StabilizerJoint;
                 // 弹簧是建关节那一刻写进驱动的，改配方要重新落一遍
-                // （ClumsyRagdoll.SpringFor 在方法3 下把 hips 弹簧返回 0）；力矩那一侧是每帧现算。
+                // （RagdollJointConfigurator 在方法3 下把 hips 弹簧返回 0）；力矩那一侧是每帧现算。
                 Ragdoll.ApplySprings();
             }
         }

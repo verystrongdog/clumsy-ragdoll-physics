@@ -12,6 +12,12 @@ namespace RaccoonStep
         public RaccoonBoneMap BoneMap;
         public RaccoonStepCharacter Character;
 
+        RaccoonLegStepController _singleLegController;
+        RaccoonFootController _footController;
+        RaccoonLegMechanism _legMechanism;
+        RaccoonMouseInput _mouseInput;
+        bool _singleLegWasEnabled, _footWasEnabled, _legMechanismWasEnabled, _mouseWasEnabled;
+
 
         [Header("Mass model")]
         public bool IncludeAllProxyBodies = true;
@@ -90,6 +96,7 @@ namespace RaccoonStep
         public float BodyTiltAngle { get; private set; }
         public float FeetDistance { get; private set; }
         public float EffectiveSupportRadius { get; private set; }
+        public RaccoonSupportState SupportState { get; private set; }
 
 
         public bool IsFalling { get { return _isFalling; } }
@@ -143,6 +150,10 @@ namespace RaccoonStep
             if (StepController == null) StepController = GetComponent<RaccoonAlternatingLegController>();
             if (BoneMap == null) BoneMap = GetComponent<RaccoonBoneMap>();
             if (Character == null) Character = GetComponent<RaccoonStepCharacter>();
+            _singleLegController = GetComponent<RaccoonLegStepController>();
+            _footController = GetComponent<RaccoonFootController>();
+            _legMechanism = GetComponent<RaccoonLegMechanism>();
+            _mouseInput = GetComponent<RaccoonMouseInput>();
 
         }
 
@@ -216,28 +227,13 @@ void FixedUpdate()
             if (_bodies == null || _bodies.Length == 0)
                 return;
 
-            Vector3 weightedPosition = Vector3.zero;
-            float mass = 0f;
-            for (int i = 0; i < _bodies.Length; i++)
-            {
-                Rigidbody body = _bodies[i];
-                if (body == null || body.mass <= 0f)
-                    continue;
-                weightedPosition += body.worldCenterOfMass * body.mass;
-                mass += body.mass;
-            }
-
-            if (AdditionalMass > 0f)
-            {
-                weightedPosition += transform.TransformPoint(AdditionalMassLocalOffset) * AdditionalMass;
-                mass += AdditionalMass;
-            }
-
-            if (mass <= 0f)
+            RaccoonMassMeasurement massMeasurement = RaccoonCenterOfMassEstimator.Measure(
+                _bodies, transform, AdditionalMass, AdditionalMassLocalOffset);
+            if (!massMeasurement.IsValid)
                 return;
 
-            TotalMass = mass;
-            CenterOfMassWorld = weightedPosition / mass;
+            TotalMass = massMeasurement.TotalMass;
+            CenterOfMassWorld = massMeasurement.CenterOfMassWorld;
             CenterOfMassProjection = new Vector3(
                 CenterOfMassWorld.x, GroundHeight(), CenterOfMassWorld.z);
             BodyTiltAngle = GetBodyTiltAngle();
@@ -246,6 +242,12 @@ void FixedUpdate()
             {
                 SupportPointWorld = CenterOfMassProjection;
                 BalanceError = Vector3.zero;
+                SupportState = new RaccoonSupportState
+                {
+                    Mode = RaccoonSupportMode.None,
+                    SupportPointWorld = SupportPointWorld,
+                    BalanceError = BalanceError
+                };
                 _unbalancedTime = 0f;
                 return;
             }
@@ -301,10 +303,9 @@ ApplyUpperBodyFeedback();
             Vector3 correction = Vector3.zero;
             if (ApplyBalanceCorrection && singleSupport)
             {
-                correction = BalanceError * BalanceGain * Time.fixedDeltaTime;
-                correction = Vector3.ClampMagnitude(
-                    correction, MaxCorrectionSpeed * Time.fixedDeltaTime);
-                correction = Vector3.ClampMagnitude(correction, MaxCorrectionPerFixedStep);
+                correction = RaccoonBalanceController.CalculateCorrection(
+                    BalanceError, BalanceGain, MaxCorrectionSpeed,
+                    MaxCorrectionPerFixedStep, Time.fixedDeltaTime);
                 StepController.ApplyBalanceCorrection(correction);
             }
 
@@ -328,6 +329,16 @@ ApplyUpperBodyFeedback();
             // Clamp the configured threshold to the actual support footprint.
             float supportRadius = GetEffectiveSupportRadius();
             EffectiveSupportRadius = supportRadius;
+            SupportState = new RaccoonSupportState
+            {
+                Mode = invalidFootPlacement ? RaccoonSupportMode.Invalid
+                    : (singleSupport ? RaccoonSupportMode.SingleFoot : RaccoonSupportMode.DoubleFoot),
+                SupportPointWorld = SupportPointWorld,
+                BalanceError = BalanceError,
+                FallDirectionWorld = _invalidFootFallDirectionWorld,
+                FeetDistance = FeetDistance,
+                EffectiveSupportRadius = supportRadius
+            };
             float allowedDistance = Mathf.Min(configuredLimit, supportRadius);
 
             // This is the actual foot-placement feedback signal: once the
@@ -469,7 +480,7 @@ void BeginFall()
             awayFromSupport.Normalize();
             _fallAxis = Vector3.Cross(Vector3.up, awayFromSupport).normalized;
 
-            StepController.enabled = false;
+            SuspendWalkingControllers();
             if (Character != null)
                 Character.State = RaccoonStepState.Falling;
 
@@ -485,6 +496,24 @@ void BeginFall()
             {
                 Debug.Log("[RaccoonStep] Balance limit exceeded: entering hybrid controlled fall.", this);
             }
+        }
+
+        void SuspendWalkingControllers()
+        {
+            if (StepController != null) StepController.enabled = false;
+            if (_singleLegController != null) { _singleLegWasEnabled = _singleLegController.enabled; _singleLegController.enabled = false; }
+            if (_footController != null) { _footWasEnabled = _footController.enabled; _footController.enabled = false; }
+            if (_legMechanism != null) { _legMechanismWasEnabled = _legMechanism.enabled; _legMechanism.enabled = false; }
+            if (_mouseInput != null) { _mouseWasEnabled = _mouseInput.enabled; _mouseInput.enabled = false; }
+        }
+
+        void RestoreWalkingControllers()
+        {
+            if (StepController != null) StepController.enabled = true;
+            if (_singleLegController != null) _singleLegController.enabled = _singleLegWasEnabled;
+            if (_footController != null) _footController.enabled = _footWasEnabled;
+            if (_legMechanism != null) _legMechanism.enabled = _legMechanismWasEnabled;
+            if (_mouseInput != null) _mouseInput.enabled = _mouseWasEnabled;
         }
 
 void UpdateFall()
@@ -575,7 +604,7 @@ void Update()
                 ResetAfterFall();
         }
 
-        void ResetAfterFall()
+        public void ResetAfterFall()
         {
             _isFalling = false;
             _unbalancedTime = 0f;
@@ -598,6 +627,8 @@ void Update()
 
             if (Character != null)
                 Character.State = RaccoonStepState.Stable;
+
+            RestoreWalkingControllers();
         }
 
         /// <summary>

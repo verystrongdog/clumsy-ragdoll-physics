@@ -43,6 +43,7 @@ namespace RaccoonStep
         public float StepProgress { get { return Mathf.Clamp01(_progress); } }
         public bool ActiveLegIsLeft { get; private set; }
         public Vector3 SupportFootWorld { get { return _supportFootWorld; } }
+        public RaccoonStepCommand CurrentCommand { get { return _gaitCoordinator.CurrentCommand; } }
 
         public void ApplyBalanceCorrection(Vector3 worldDelta)
         {
@@ -88,6 +89,7 @@ namespace RaccoonStep
         float _pressStartTime;
         float _heldPressDuration;
         bool _releaseRequested;
+        readonly RaccoonGaitCoordinator _gaitCoordinator = new RaccoonGaitCoordinator();
 
         float GetActionSpeedScale()
         {
@@ -176,6 +178,7 @@ namespace RaccoonStep
             }
 
             IsReady = true;
+            _gaitCoordinator.Reset();
             ApplyLegPose(_left, transform.TransformPoint(_left.HipLocal), _left.FootWorld);
             ApplyLegPose(_right, transform.TransformPoint(_right.HipLocal), _right.FootWorld);
             Debug.Log("[RaccoonStep] Alternating leg controller ready: left/right mouse step commands enabled.", this);
@@ -367,10 +370,13 @@ bool IsPrecisePlacementMode()
             return cameraFollow != null && cameraFollow.IsFirstPerson;
         }
 
-void FixedUpdate()
+        void FixedUpdate()
         {
             if (!IsReady)
                 return;
+
+            _gaitCoordinator.BuildCommand(IsSingleSupport, ActiveLegIsLeft,
+                _targetGround, StepProgress);
 
             if (_state == StepState.Lifting)
             {
@@ -554,21 +560,11 @@ bool TryGetGroundTarget(out Vector3 target)
 
         void ApplyLegPose(LegData leg, Vector3 hip, Vector3 ankle)
         {
-            Vector3 toTarget = ankle - hip;
-            float distance = Mathf.Clamp(toTarget.magnitude,
-                Mathf.Abs(leg.UpperLength - leg.LowerLength) + 0.01f,
-                Mathf.Max(0.02f, leg.UpperLength + leg.LowerLength - 0.01f));
-            Vector3 direction = toTarget.sqrMagnitude > 0.0001f ? toTarget.normalized : Vector3.down;
             Vector3 pole = transform.forward + Vector3.up * KneeForwardBias;
-            Vector3 bend = Vector3.ProjectOnPlane(pole, direction).normalized;
-            if (bend.sqrMagnitude < 0.0001f)
-                bend = Vector3.up;
-
-            float cosKnee = (leg.UpperLength * leg.UpperLength + distance * distance
-                - leg.LowerLength * leg.LowerLength) / (2f * leg.UpperLength * distance);
-            cosKnee = Mathf.Clamp(cosKnee, -1f, 1f);
-            float sinKnee = Mathf.Sqrt(Mathf.Max(0f, 1f - cosKnee * cosKnee));
-            Vector3 knee = hip + direction * (cosKnee * leg.UpperLength) + bend * (sinKnee * leg.UpperLength);
+            RaccoonLegPose pose;
+            RaccoonLegPoseSolver.TrySolve(hip, ankle, leg.UpperLength, leg.LowerLength,
+                pole, 0.01f, Mathf.Max(0.02f, leg.UpperLength + leg.LowerLength - 0.01f), out pose);
+            Vector3 knee = pose.Knee;
 
             SetSegment(leg.UpperProxy, hip, knee,
                 transform.TransformDirection(leg.UpperReferenceForwardLocal));

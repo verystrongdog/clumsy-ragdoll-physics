@@ -151,12 +151,11 @@ void Awake()
                 targetHips = transform.TransformPoint(_neutralHips) + feetCenter - initialFeetCenter;
             }
 
-            Vector3 positionError = targetHips - _hipsBody.position;
-            Vector3 acceleration = positionError * PositionSpring - _hipsBody.linearVelocity * PositionDamper;
-            acceleration = Vector3.ClampMagnitude(acceleration, MaxBalanceAcceleration);
+            Vector3 acceleration = RaccoonBalanceController.CalculatePositionAcceleration(
+                targetHips, _hipsBody.position, _hipsBody.linearVelocity,
+                PositionSpring, PositionDamper, MaxBalanceAcceleration);
             _hipsBody.AddForce(acceleration, ForceMode.Acceleration);
 
-            Vector3 tiltAxis = Vector3.Cross(_hipsBody.transform.up, Vector3.up);
             float uprightSpring = UseStrongUprightAssist
                 ? Mathf.Max(UprightSpring, MinimumUprightSpring)
                 : UprightSpring;
@@ -166,8 +165,9 @@ void Awake()
             float maxTorque = UseStrongUprightAssist
                 ? Mathf.Max(MaxBalanceTorque, MinimumBalanceTorque)
                 : MaxBalanceTorque;
-            Vector3 torque = tiltAxis * uprightSpring - _hipsBody.angularVelocity * uprightDamper;
-            torque = Vector3.ClampMagnitude(torque, maxTorque);
+            Vector3 torque = RaccoonBalanceController.CalculateUprightAcceleration(
+                _hipsBody.transform, _hipsBody.angularVelocity,
+                uprightSpring, uprightDamper, maxTorque);
             _hipsBody.AddTorque(torque, ForceMode.Acceleration);
 
         }
