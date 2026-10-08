@@ -35,16 +35,6 @@ namespace RaccoonStep
             if (Recovery == null) Recovery = GetComponent<RaccoonSitRecoveryController>();
         }
 
-        void Update()
-        {
-            if (EnableMouseTrigger && !IsRunning && Recovery != null
-                && Recovery.IsSeatedRecoveryComplete
-                && Input.GetMouseButtonDown(0))
-            {
-                Begin(true);
-            }
-        }
-
         void FixedUpdate()
         {
             if (!IsRunning || !_leg.Valid || PhysicsRig == null)

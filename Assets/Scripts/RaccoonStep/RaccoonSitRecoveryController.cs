@@ -164,6 +164,17 @@ namespace RaccoonStep
             if (!EnableInput || !_ready)
                 return;
 
+            if (IsSeatedRecoveryComplete && Input.GetMouseButtonDown(0))
+            {
+                RaccoonSeatedLegRetractionExperiment experiment =
+                    GetComponent<RaccoonSeatedLegRetractionExperiment>();
+                if (experiment != null && experiment.Begin(true))
+                {
+                    Debug.Log("[RaccoonStep] Second-click left leg retraction requested.", this);
+                    return;
+                }
+            }
+
             if (Input.GetMouseButtonDown(0) && BeginLegRecovery(true))
             {
                 _pullButtonHeld = true;
