@@ -12,6 +12,8 @@ namespace RaccoonStep
     {
         public RaccoonBoneMap BoneMap;
         public RaccoonPhysicsRig PhysicsRig;
+        public RaccoonSitRecoveryController Recovery;
+        public bool EnableMouseTrigger = true;
         public float GroundHeight;
         public float Duration = 1.2f;
         public float FootForward = 0.16f;
@@ -30,6 +32,17 @@ namespace RaccoonStep
         {
             if (BoneMap == null) BoneMap = GetComponent<RaccoonBoneMap>();
             if (PhysicsRig == null) PhysicsRig = GetComponent<RaccoonPhysicsRig>();
+            if (Recovery == null) Recovery = GetComponent<RaccoonSitRecoveryController>();
+        }
+
+        void Update()
+        {
+            if (EnableMouseTrigger && !IsRunning && Recovery != null
+                && Recovery.IsSeatedRecoveryComplete
+                && Input.GetMouseButtonDown(0))
+            {
+                Begin(true);
+            }
         }
 
         void FixedUpdate()

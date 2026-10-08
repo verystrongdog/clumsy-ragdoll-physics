@@ -89,6 +89,12 @@ namespace RaccoonStep
         public float StandingHipHeight = 0.62f;
 
         public RaccoonPostureState PostureState { get; private set; }
+        public bool IsSeatedRecoveryComplete
+        {
+            get { return _frozenForRecovery
+                && _recoveryPhase == RaccoonRecoveryPhase.Complete
+                && TorsoOnlyRecovery && !SideLeanOnlyRecovery; }
+        }
 
         RaccoonLegStepController _singleLegController;
         RaccoonAlternatingLegController _alternatingLegController;

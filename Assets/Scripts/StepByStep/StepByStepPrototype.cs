@@ -19,6 +19,7 @@ namespace StepByStep
         public RaccoonAlternatingLegController Gait { get; private set; }
         public RaccoonCenterOfMassBalance CenterOfMassBalance { get; private set; }
         public RaccoonSitRecoveryController Recovery { get; private set; }
+        public RaccoonSeatedLegRetractionExperiment SeatedLegExperiment { get; private set; }
         public bool IsBound { get; private set; }
 
         void Awake()
@@ -65,6 +66,9 @@ namespace StepByStep
             Gait = characterObject.GetComponent<RaccoonAlternatingLegController>();
             CenterOfMassBalance = characterObject.GetComponent<RaccoonCenterOfMassBalance>();
             Recovery = characterObject.GetComponent<RaccoonSitRecoveryController>();
+            SeatedLegExperiment = characterObject.GetComponent<RaccoonSeatedLegRetractionExperiment>();
+            if (SeatedLegExperiment == null)
+                SeatedLegExperiment = characterObject.AddComponent<RaccoonSeatedLegRetractionExperiment>();
 
             if (Character != null) Character.BoneMap = BoneMap;
             if (PhysicsRig != null) PhysicsRig.BoneMap = BoneMap;
@@ -106,6 +110,12 @@ namespace StepByStep
                 Recovery.PhysicsRig = PhysicsRig;
                 Recovery.Balance = CenterOfMassBalance;
                 Recovery.Character = Character;
+            }
+            if (SeatedLegExperiment != null)
+            {
+                SeatedLegExperiment.BoneMap = BoneMap;
+                SeatedLegExperiment.PhysicsRig = PhysicsRig;
+                SeatedLegExperiment.Recovery = Recovery;
             }
 
             IsBound = Character != null && BoneMap != null && PhysicsRig != null;
