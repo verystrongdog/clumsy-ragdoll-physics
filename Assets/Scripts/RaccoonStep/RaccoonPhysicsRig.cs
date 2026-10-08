@@ -815,7 +815,9 @@ namespace RaccoonStep
             // A foot that is already on the floor must never carry upward
             // velocity into the next drive tick. Downward velocity is left to
             // the contact solver and gravity.
-            if (collider.bounds.min.y <= groundHeight + 0.004f && body.linearVelocity.y > 0f)
+            if (!body.isKinematic
+                && collider.bounds.min.y <= groundHeight + 0.004f
+                && body.linearVelocity.y > 0f)
             {
                 Vector3 velocity = body.linearVelocity;
                 velocity.y = 0f;
