@@ -116,6 +116,7 @@ namespace RaccoonStep
         bool _torsoDriveLogged;
         float _torsoDiagnosticTimer;
         Vector3 _recoveryPullDirection;
+        Vector3 _recoveryFacing;
         bool _pullButtonHeld;
         float _shortPressForceRemaining;
         Vector3 _hipsPosition;
@@ -295,6 +296,7 @@ namespace RaccoonStep
                 _headStartRotation = head.rotation;
                 _spineStartAxis = spine.up;
                 _headStartAxis = head.up;
+                _recoveryFacing = ResolveRecoveryFacing(spine);
                 PhysicsRig.SetRecoveryTorsoMotion(spine, true);
                 // Keep the head-neck joint constrained. The head is allowed
                 // to follow the torso through its normal angular limits, but
@@ -1113,14 +1115,11 @@ namespace RaccoonStep
             // tilted target, which caused a small snap and let the completion
             // test fire before the actual lift. Interpolate the measured
             // fallen axis toward vertical instead.
-            Vector3 spineTargetAxis = RaccoonRecoveryPosePlanner.InterpolateAxis(
-                _spineStartAxis, targetUp, blend);
-            Vector3 headTargetAxis = RaccoonRecoveryPosePlanner.InterpolateAxis(
-                _headStartAxis, targetUp, blend);
-            Quaternion spineLift = Quaternion.FromToRotation(_spineStartAxis, spineTargetAxis);
-            Quaternion targetRotation = spineLift * _spineStartRotation;
-            Quaternion headLift = Quaternion.FromToRotation(_headStartAxis, headTargetAxis);
-            Quaternion headTargetRotation = headLift * _headStartRotation;
+            Quaternion seatedRotation = Quaternion.LookRotation(_recoveryFacing, Vector3.up);
+            Quaternion targetRotation = Quaternion.Slerp(
+                _spineStartRotation, seatedRotation, Mathf.Clamp01(blend));
+            Quaternion headTargetRotation = Quaternion.Slerp(
+                _headStartRotation, seatedRotation, Mathf.Clamp01(blend));
 
             if (!_torsoDriveLogged)
             {
@@ -1181,6 +1180,18 @@ namespace RaccoonStep
             // spine perpendicular to the ground plane is parallel to the
             // ground normal, so this is independent of the head pose.
             return RaccoonRecoveryPosePlanner.IsUpright(spine.up, TorsoUprightTolerance);
+        }
+
+        Vector3 ResolveRecoveryFacing(Transform spine)
+        {
+            Vector3 facing = spine != null
+                ? Vector3.ProjectOnPlane(spine.forward, Vector3.up)
+                : Vector3.zero;
+            if (facing.sqrMagnitude < 0.0001f)
+                facing = Vector3.ProjectOnPlane(_recoveryPullDirection, Vector3.up);
+            if (facing.sqrMagnitude < 0.0001f)
+                facing = Vector3.ProjectOnPlane(transform.forward, Vector3.up);
+            return facing.normalized;
         }
 
         struct LegTarget
